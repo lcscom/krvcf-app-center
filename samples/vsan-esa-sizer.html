@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vSAN ESA Quick Capacity Calculator</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Malgun Gothic",sans-serif;margin:0;background:#f5f6f7;color:#313131}
+  header{background:#0e2a38;color:#fff;padding:14px 22px;font-size:18px;display:flex;align-items:center;gap:12px}
+  header button{margin-left:auto;background:transparent;color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px}
+  main{max-width:860px;margin:24px auto;padding:0 18px;display:grid;gap:18px;grid-template-columns:1fr 1fr}
+  section{background:#fff;border:1px solid #d7dbdd;border-radius:4px;padding:18px}
+  h2{font-size:15px;margin:0 0 14px}
+  label{display:block;font-size:13px;color:#565656;margin:10px 0 4px}
+  input,select{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #d7dbdd;border-radius:3px;font:inherit;font-size:16px}
+  .big{font-size:34px;font-weight:300;color:#0072a3}
+  .row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #eee;font-size:14px}
+  .note{font-size:12px;color:#737373;margin-top:12px;line-height:1.5}
+  @media(max-width:700px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><span data-t="title"></span><button id="lang" type="button"></button></header>
+<main>
+  <section>
+    <h2 data-t="cluster"></h2>
+    <label data-t="hosts"></label><input id="hosts" type="number" min="3" value="6">
+    <label data-t="disks"></label><input id="disks" type="number" min="1" value="8">
+    <label data-t="size"></label><input id="size" type="number" min="0.1" step="0.01" value="3.84">
+    <label data-t="policy"></label>
+    <select id="policy">
+      <option value="0.5">RAID-1 (FTT=1) — 2x</option>
+      <option value="0.8" selected>RAID-5 (FTT=1, 4+1) — 1.25x</option>
+      <option value="0.6667">RAID-5 (FTT=1, 2+1) — 1.5x</option>
+      <option value="0.6667">RAID-6 (FTT=2, 4+2) — 1.5x</option>
+    </select>
+    <label data-t="comp"></label><input id="comp" type="number" min="1" step="0.1" value="1.5">
+  </section>
+  <section>
+    <h2 data-t="result"></h2>
+    <div class="row"><span data-t="raw"></span><b id="raw"></b></div>
+    <div class="row"><span data-t="usable"></span><b id="usable"></b></div>
+    <div class="row"><span data-t="afterPolicy"></span><b id="policyCap"></b></div>
+    <div style="margin-top:16px;font-size:13px;color:#565656" data-t="effective"></div>
+    <div class="big" id="eff"></div>
+    <p class="note" data-t="note"></p>
+  </section>
+</main>
+<script>
+  // Bilingual sample app: follows the browser language, with a manual toggle
+  const T = {
+    en: {
+      title: 'vSAN ESA Quick Capacity Calculator', cluster: 'Cluster configuration', hosts: 'Number of hosts', disks: 'NVMe devices per host',
+      size: 'Device capacity (TB)', policy: 'Storage policy', comp: 'Expected compression ratio (x)', result: 'Result', raw: 'Raw capacity',
+      usable: 'After operations reserve + host rebuild reserve', afterPolicy: 'After storage policy', effective: 'Effective capacity incl. compression',
+      note: 'A rough estimate that simply subtracts a 10% operations reserve and one host of rebuild reserve. Validate real sizing with the official vSAN ReadyNode Sizer.',
+      toggle: '한국어',
+    },
+    ko: {
+      title: 'vSAN ESA 간이 용량 계산기', cluster: '클러스터 구성', hosts: '호스트 수', disks: '호스트당 NVMe 디바이스 수',
+      size: '디바이스 용량 (TB)', policy: '스토리지 정책', comp: '압축 예상 효율 (x)', result: '결과', raw: 'Raw 용량',
+      usable: '운영 예비분 + 호스트 재구성 예약 차감 후', afterPolicy: '정책 적용 후', effective: '압축 반영 실효 용량',
+      note: '운영 예비분 10%와 호스트 1대 재구성 예약을 단순 차감한 근사치입니다. 실제 사이징은 공식 vSAN ReadyNode Sizer로 검증하세요.',
+      toggle: 'EN',
+    },
+  };
+  let lang = /^ko\b/i.test(navigator.language || '') ? 'ko' : 'en';
+  const $ = (id) => document.getElementById(id);
+  function applyLang() {
+    document.documentElement.lang = lang;
+    document.title = T[lang].title;
+    document.querySelectorAll('[data-t]').forEach((el) => { el.textContent = T[lang][el.dataset.t]; });
+    $('lang').textContent = T[lang].toggle;
+  }
+  const tb = (v) => v.toFixed(1) + ' TB';
+  function calc() {
+    const h = +$('hosts').value, d = +$('disks').value, s = +$('size').value;
+    const p = +$('policy').value, c = +$('comp').value;
+    const raw = h * d * s;
+    const usable = raw * 0.9 * (h > 1 ? (h - 1) / h : 1);
+    const pol = usable * p;
+    $('raw').textContent = tb(raw);
+    $('usable').textContent = tb(usable);
+    $('policyCap').textContent = tb(pol);
+    $('eff').textContent = tb(pol * c);
+  }
+  $('lang').onclick = () => { lang = lang === 'en' ? 'ko' : 'en'; applyLang(); };
+  document.querySelectorAll('input,select').forEach((el) => el.addEventListener('input', calc));
+  applyLang();
+  calc();
+</script>
+</body>
+</html>

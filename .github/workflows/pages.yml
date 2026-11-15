@@ -1,0 +1,40 @@
+name: Deploy Web (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Record deployed version + bust static file cache (?v=commit)
+      - name: Stamp version
+        run: |
+          SHORT="${GITHUB_SHA::7}"
+          printf '{"sha":"%s","builtAt":"%s"}\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > web/version.json
+          sed -i -E "s#(href|src)=\"(app\.css|config\.js|i18n\.js|app\.js)\"#\1=\"\2?v=${SHORT}\"#g" web/index.html
+          grep -n "?v=" web/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

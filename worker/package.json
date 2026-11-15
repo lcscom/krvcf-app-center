@@ -1,0 +1,12 @@
+{
+  "name": "krvcf-app-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler d1 migrations apply krvcf-apps --local && wrangler dev --port 8787",
+    "deploy": "wrangler d1 migrations apply krvcf-apps --remote && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
