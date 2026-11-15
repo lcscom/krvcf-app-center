@@ -427,6 +427,32 @@ async function runWorkflow(file, label) {
   ok(`${label} 완료`);
 }
 
+/* ───────────── update: follow the deploys started by the installer's push ───────────── */
+async function watchPushDeploys() {
+  head('U', '업데이트 배포 (GitHub Actions 자동 실행)');
+  const head_ = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  let any = false;
+  for (const [file, label] of [['worker.yml', 'Deploy API'], ['pages.yml', 'Deploy Web']]) {
+    let run = null;
+    for (let i = 0; i < 10 && !run; i++) {
+      const runs = gh(['run', 'list', '--repo', state.repo, '--workflow', file, '--limit', '5', '--json', 'databaseId,headSha,event,url'], { json: true, allowFail: true }) || [];
+      run = runs.find((r) => r.headSha === head_ && r.event === 'push');
+      if (!run) await sleep(3000);
+    }
+    if (!run) { info(`${label}: 이번 변경과 무관해 실행되지 않음`); continue; }
+    any = true;
+    info(`${label} 진행 상황: ${run.url}`);
+    const w = spawnSync('gh', ['run', 'watch', String(run.databaseId), '--repo', state.repo, '--exit-status', '--interval', '5'], { stdio: 'inherit' });
+    if (w.status !== 0) {
+      const log = gh(['run', 'view', String(run.databaseId), '--repo', state.repo, '--log-failed'], { allowFail: true }) || '';
+      console.log(C.d(log.split('\n').slice(-25).join('\n')));
+      die(`${label} 실패 — 고친 뒤 다시: bash ~/krvcf-install.sh`);
+    }
+    ok(`${label} 완료`);
+  }
+  if (!any) info('배포할 변경이 없었습니다.');
+}
+
 /* ───────────── F. API (Worker) ───────────── */
 async function stepF() {
   head('F', 'API(Worker) 배포');
@@ -458,11 +484,13 @@ async function stepG() {
   info('도메인 탈취 방지를 위해 GitHub 계정에서 도메인 소유 인증을 권장합니다(선택, 화면에서 TXT 1개).');
   info(`  https://github.com/settings/pages → Add a domain → ${ZONE}`);
 
-  // GitHub first, then DNS (GitHub's recommended order)
-  gh(['api', '-X', 'PUT', `repos/${state.repo}/pages`, '-f', `cname=${WEB_HOST}`]);
-  ok(`Pages 커스텀 도메인 ${WEB_HOST}`);
+  // DNS first: if GitHub checks the domain before the record exists, its resolver caches NXDOMAIN
+  // (zone negative TTL, ~30 min on Cloudflare) and no certificate is requested until it expires.
   await getCfToken();
   await upsertDns({ type: 'CNAME', name: WEB_HOST, content: `${state.owner.toLowerCase()}.github.io`, proxied: false }, 'Pages');
+  const setCname = () => { gh(['api', '-X', 'PUT', `repos/${state.repo}/pages`, '-F', 'cname=null'], { allowFail: true }); gh(['api', '-X', 'PUT', `repos/${state.repo}/pages`, '-f', `cname=${WEB_HOST}`]); };
+  setCname();
+  ok(`Pages 커스텀 도메인 ${WEB_HOST}`);
 
   await runWorkflow('pages.yml', 'Deploy Web');
 
@@ -472,12 +500,13 @@ async function stepG() {
     const p = gh(['api', `repos/${state.repo}/pages`], { json: true, allowFail: true });
     if (p?.https_enforced) { enforced = true; break; }
     const st = p?.https_certificate?.state;
+    if (!st && i > 0 && i % 10 === 0) { setCname(); info('인증서 요청이 아직 없어 도메인을 다시 등록했습니다 (GitHub DNS 재확인).'); }
     if (st === 'approved' || st === 'issued') {
       enforced = gh(['api', '-X', 'PUT', `repos/${state.repo}/pages`, '-F', 'https_enforced=true'], { allowFail: true }) !== null;
     }
     if (!enforced) await sleep(30000);
   }
-  enforced ? ok('Enforce HTTPS 켬') : warn('인증서가 아직입니다. 나중에 다시: node scripts/setup.mjs --only G');
+  enforced ? ok('Enforce HTTPS 켬') : warn('인증서가 아직입니다(HTTP로는 접속됨). 30분쯤 뒤 다시: node scripts/setup.mjs --only G');
 
   const v = await http(`https://${WEB_HOST}/version.json`, { timeout: 8000 });
   v.ok && v.data?.sha ? ok(`https://${WEB_HOST} 응답 · ${String(v.data.sha).slice(0, 7)}`) : warn(`https://${WEB_HOST} 가 아직 응답하지 않습니다 (DNS 전파 대기).`);
@@ -597,6 +626,7 @@ try {
     const done = state.done || {};
     const run = only ? [only] : from ? keys.slice(keys.indexOf(from)) : argv.includes('--all') ? keys : keys.filter((k) => !done[k]);
     const skipped = keys.filter((k) => !run.includes(k) && done[k]);
+    if (process.env.KRVCF_UPDATED === '1' && !run.includes('F')) await watchPushDeploys();
     if (skipped.length && !only) info(`이미 끝난 단계 건너뜀: ${skipped.join(' ')} (다시 하려면 --all 또는 --from <단계>)`);
     if (run.some((k) => ['D', 'E', 'F', 'G'].includes(k)) && !run.includes('B') && !state.zoneId) die('B단계 기록이 없습니다. --from B로 실행하세요.');
     for (const k of run) {

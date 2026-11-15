@@ -136,8 +136,9 @@
   }
   function thumb(app, icoSize = 34) {
     const ci = (CAT[app.category] || {}).i || 'grid';
-    const img = app.thumbnail ? `<img class="thumb-img" src="${esc(app.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '';
-    return `<div class="thumb${app.thumbnail ? ' has-img' : ''}" style="background:${gradient(app.id)}">${img}<span class="thumb-ico">${ico(ci, icoSize)}</span><span class="thumb-init">${esc(initials(app.name))}</span></div>`;
+    const tsrc = app.thumbnail || (app.screenshots && app.screenshots[0] && app.screenshots[0].url) || '';
+    const img = tsrc ? `<img class="thumb-img" src="${esc(tsrc)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '';
+    return `<div class="thumb${tsrc ? ' has-img' : ''}" style="background:${gradient(app.id)}">${img}<span class="thumb-ico">${ico(ci, icoSize)}</span><span class="thumb-init">${esc(initials(app.name))}</span></div>`;
   }
   document.addEventListener('error', (e) => {
     const t = e.target;
@@ -151,7 +152,8 @@
   async function api(path, opts = {}) {
     const headers = Object.assign({}, opts.headers || {});
     let body = opts.body;
-    if (body !== undefined && typeof body !== 'string') { headers['content-type'] = 'application/json'; body = JSON.stringify(body); }
+    if (typeof Blob !== 'undefined' && body instanceof Blob) headers['content-type'] = body.type || 'application/octet-stream';
+    else if (body !== undefined && typeof body !== 'string') { headers['content-type'] = 'application/json'; body = JSON.stringify(body); }
     const tok = token();
     if (tok) headers.authorization = 'Bearer ' + tok;
     headers['x-lang'] = EN_UI ? 'en' : 'ko';
@@ -766,11 +768,18 @@
           ${app.tags && app.tags.length ? `<div class="tags" style="margin-top:8px" data-notr>${app.tags.map((t) => `<a class="tag" href="#/tag/${encodeURIComponent(t)}">#${esc(t)}</a>`).join('')}</div>` : ''}</div>
         <div class="acts">
           <button class="btn btn-primary" id="dRun">${ico('play', 13)} 앱 실행</button>
+          ${app.demoUrl ? `<a class="btn" id="dDemo" href="${esc(app.demoUrl)}" target="_blank" rel="noopener">${ico('ext', 13)} ${L('데모 실행', 'Open demo')}</a>` : ''}
           ${approved ? `${favBtn(id, true)}<button class="btn" id="dShare">${ico('share', 14)} 공유</button>` : ''}
           ${canEdit ? `<a class="btn" href="#/submit/${id}">${ico('edit', 14)} 수정</a>` : ''}
         </div></div>
       <div class="detail-grid"><div class="d-main">
       <div class="portlet" style="margin-bottom:16px"><div class="portlet-hd">${ico('chat')} 설명</div><div class="portlet-bd"><p class="desc-full">${esc(app.description)}</p></div></div>
+      ${shotGallery(app)}
+      ${app.demoUrl || app.hasAccessGuide ? `<div class="portlet access" style="margin-bottom:16px"><div class="portlet-hd">${ico('key')} ${L('데모 · 접속 방법', 'Demo & access')}${app.accessPrivate ? `<span class="lbl" style="margin-left:8px">${L('로그인 사용자 전용', 'Signed-in only')}</span>` : ''}<span class="acts">${app.accessGuide ? `<button class="btn btn-sm btn-link" id="dCopyGuide">${ico('copy', 13)} ${L('복사', 'Copy')}</button>` : ''}</span></div><div class="portlet-bd">
+        ${app.demoUrl ? `<div class="demo-url">${ico('link', 14)}<a href="${esc(app.demoUrl)}" target="_blank" rel="noopener" data-notr>${esc(app.demoUrl)}</a>${/^http:/i.test(app.demoUrl) ? `<span class="lbl pending">${L('http · 내부망/랩 주소일 수 있음', 'http · may be an internal/lab address')}</span>` : ''}</div>` : ''}
+        ${app.accessGuide ? `<p class="desc-full" data-notr>${esc(app.accessGuide)}</p>`
+          : app.hasAccessGuide ? `<div class="alert info" style="margin:0">${ico('lock')}<div>${L('접속 방법(테스트 계정 등)은 로그인한 사용자에게만 보입니다.', 'The access guide (test accounts, etc.) is visible to signed-in users only.')} <button class="btn btn-sm btn-primary" id="dGuideLogin" style="margin-left:6px">${L('로그인', 'Sign in')}</button></div></div>` : ''}
+      </div></div>` : ''}
       <div class="portlet" style="margin-bottom:16px"><div class="portlet-hd">${ico('git')} ${L('버전 기록', 'Version history')}<span class="acts" style="font-size:12.5px;color:var(--muted)">${L('최근 10개 보관', 'Last 10 kept')}</span></div><div class="portlet-bd flush" id="dVer"><div class="skel" style="height:40px;margin:12px"></div></div></div>
       ${approved ? `<div class="portlet" id="reviews"><div class="portlet-hd">${ico('star')} ${L('리뷰 및 평점', 'Reviews & ratings')}<span class="acts"><button class="btn btn-sm btn-link" id="dPriv">${ico('chat', 13)} ${L('비공개 피드백', 'Private feedback')}</button></span></div><div class="portlet-bd" id="dRev"><div class="skel" style="height:80px"></div></div></div>` : ''}
       <div class="report-row"><button class="btn btn-sm btn-link" id="dReport">${ico('flag', 13)} ${L('이 앱 신고하기', 'Report this app')}</button></div>
@@ -782,12 +791,17 @@
           <dt>작성자</dt><dd><a href="#/author/${encodeURIComponent(app.author)}" data-notr>${esc(app.author)}</a></dd>
           <dt>${L('버전', 'Version')}</dt><dd>v${app.version || 1}${app.changelog ? ` · <span data-notr>${esc(app.changelog)}</span>` : ''}</dd>
           ${app.type === 'link' ? `<dt>URL</dt><dd><a href="${esc(app.url)}" target="_blank" rel="noopener">${esc(app.url)}</a></dd>` : `<dt>파일 크기</dt><dd>${fmtSize(app.size)}</dd>`}
+          ${app.demoUrl ? `<dt>${L('데모 URL', 'Demo URL')}</dt><dd><a href="${esc(app.demoUrl)}" target="_blank" rel="noopener" data-notr>${esc(app.demoUrl)}</a></dd>` : ''}
           <dt>등록일</dt><dd>${fmtDate(app.createdAt)}</dd><dt>수정일</dt><dd>${fmtDate(app.updatedAt)}</dd>
           <dt>앱 ID</dt><dd class="mono">${esc(app.id)}</dd>
         </dl></div></div>
       ${app.status ? `<div class="portlet" style="margin-bottom:16px"><div class="portlet-hd">${ico('clock')} 승인 이력${app.reviewedBy ? `<span class="acts" style="font-size:12.5px;color:var(--muted)">최종 검토: ${esc(app.reviewedBy)}</span>` : ''}</div><div class="portlet-bd" id="dHist"><div class="skel" style="height:40px"></div></div></div>` : ''}
       </aside></div>`);
     $('#dRun').onclick = () => launch(app, key);
+    if ($('#dDemo')) $('#dDemo').onclick = () => countRun(app);
+    $$('[data-shot]', main).forEach((b) => (b.onclick = () => openShot(app, +b.dataset.shot)));
+    if ($('#dCopyGuide')) $('#dCopyGuide').onclick = async () => toast((await copyText(`${app.demoUrl ? app.demoUrl + '\n\n' : ''}${app.accessGuide}`)) ? L('데모 URL과 접속 방법을 복사했습니다.', 'Demo URL and access guide copied.') : L('복사하지 못했습니다.', 'Copy failed.'));
+    if ($('#dGuideLogin')) $('#dGuideLogin').onclick = () => signInModal(L('로그인하면 데모 접속 방법을 볼 수 있습니다.', 'Sign in to see how to access the demo.'), () => viewDetail(id));
     if (approved) pushRecent(id);
     $$('[data-fav]', main).forEach((b) => (b.onclick = () => toggleFav(id)));
     if ($('#dHist')) api(`/api/apps/${id}/reviews`, { headers: key ? { 'x-owner-key': key } : {} })
@@ -1151,6 +1165,7 @@
       step: 1, editId: editId || null, type: params.get('type') === 'link' ? 'link' : 'html',
       name: '', author: ls.get('krvcf.author', '') || (u.role === 'owner' ? '' : u.name || ''), email: u.role === 'owner' ? ls.get('krvcf.email', '') : u.email, category: '', description: '', thumbnail: '',
       url: '', tags: '', changelog: '', html: '', htmlChanged: false, fileName: '', srcMode: 'file', agree: false, done: null, origStatus: null,
+      demoUrl: '', accessGuide: '', accessPrivate: false, screenshots: [], ghUrl: '', ghRes: null,
     };
     if (editId) {
       main.innerHTML = page('', '<div class="skel" style="height:520px"></div>');
@@ -1162,7 +1177,8 @@
           main.innerHTML = page(`<a href="#/">홈</a> / ${L('앱 수정', 'Edit app')}`, `<div class="alert warn">${ico('key')}<div>${L('이 앱의 소유자만 수정할 수 있습니다. 예전에 소유 키로 등록한 앱이라면 <a href="#/studio">내 앱 관리</a> → <b>기존 앱 연결</b>에서 계정에 연결하세요.', 'Only the owner can edit this app. If you registered it earlier with an owner key, link it to your account from <a href="#/studio">My apps</a> → <b>Link existing app</b>.')}</div></div>`);
           return;
         }
-        Object.assign(wiz, { type: app.type, name: app.name, author: app.author, email: isAdmin() ? app.email || '' : wiz.email, category: app.category, description: app.description, thumbnail: app.thumbnail || '', url: app.url || '', tags: (app.tags || []).join(', '), origStatus: app.status, size: app.size, step: 2 });
+        Object.assign(wiz, { type: app.type, name: app.name, author: app.author, email: isAdmin() ? app.email || '' : wiz.email, category: app.category, description: app.description, thumbnail: app.thumbnail || '', url: app.url || '', tags: (app.tags || []).join(', '), origStatus: app.status, size: app.size, step: 2,
+          demoUrl: app.demoUrl || '', accessGuide: app.accessGuide || '', accessPrivate: !!app.accessPrivate, screenshots: (app.screenshots || []).map((x) => ({ ...x })) });
         if (app.type === 'html') {
           const s = await api(`/api/apps/${editId}/source`, { headers: h });
           wiz.html = s.html || ''; wiz.fileName = '현재 등록된 HTML'; wiz.srcMode = 'file';
@@ -1191,12 +1207,18 @@
       body.innerHTML = `<h3>유형 선택</h3><p class="hint">앱이 표시될 위치와 실행 방식을 선택하세요.</p>
         <div class="typecards">
           <label class="typecard ${w.type === 'html' ? 'on' : ''}" data-type="html"><span class="ti">${ico('monitor', 22)}</span><div><b>데모룸 — HTML 시뮬레이터</b><p>단일 HTML 파일(최대 10MB)을 업로드하면 격리된 샌드박스에서 전체 화면 모달로 즉시 실행됩니다. 계산기, 사이징 도구, UI 시뮬레이터에 적합합니다.</p></div></label>
-          <label class="typecard ${w.type === 'link' ? 'on' : ''}" data-type="link"><span class="ti">${ico('link', 22)}</span><div><b>카탈로그 — 외부 웹 링크</b><p>이미 호스팅 중인 웹앱(https)을 링크로 등록합니다. 실행 시 새 탭으로 열립니다.</p></div></label>
+          <label class="typecard ${w.type === 'link' ? 'on' : ''}" data-type="link"><span class="ti">${ico('link', 22)}</span><div><b>카탈로그 — 외부 웹 링크</b><p>이미 호스팅 중인 웹앱(https)을 링크로 등록합니다. 실행 시 새 탭으로 열립니다. ${L('<b>실행 가능한 데모 URL</b>과 <b>접속 방법</b>(테스트 계정, VPN 등)을 함께 입력합니다.', 'You also provide a <b>runnable demo URL</b> and <b>how to access it</b> (test account, VPN, etc.).')}</p></div></label>
         </div>`;
       $$('[data-type]', body).forEach((el) => (el.onclick = () => { w.type = el.dataset.type; renderWizard(); }));
     }
     if (w.step === 2) {
+      const aiOn = !!(state.cfg && state.cfg.githubImport && state.cfg.githubImport.ai);
       body.innerHTML = `<h3>기본 정보</h3><p class="hint">카탈로그에 표시될 정보를 입력하세요.</p>
+        <div class="gh-import"><div class="gh-hd">${ico('git', 15)}<b>${L('GitHub에서 불러오기', 'Import from GitHub')}</b><span class="lbl ${aiOn ? 'approved' : ''}">${aiOn ? L('AI 작성', 'AI-written') : 'README'}</span></div>
+          <div class="inline-row"><input class="input" id="ghUrl" maxlength="300" value="${esc(w.ghUrl)}" placeholder="https://github.com/owner/repo"><button type="button" class="btn btn-primary btn-sm" id="ghGo">${ico('down', 12)} ${L('불러오기', 'Import')}</button></div>
+          <div class="help">${aiOn ? L('공개 저장소의 설명·README를 AI가 읽고 이름, 설명, 태그, 카테고리, 데모 URL, 접속 방법을 작성하고 README의 스크린샷을 가져옵니다. 결과는 아래에서 고칠 수 있습니다.', 'AI reads the public repository and README to draft the name, description, tags, category, demo URL and access guide, and pulls screenshots from the README. You can edit everything below.')
+            : L('공개 저장소의 설명·README 첫 부분과 스크린샷을 가져옵니다. (관리 콘솔 → 설정에서 AI 모델을 연결하면 AI가 설명을 작성합니다.)', 'Pulls the repository description, the start of the README and its screenshots. (Connect an AI model in Admin Console → Settings to have AI write the description.)')}</div>
+          <div id="ghRes">${ghResHtml()}</div></div>
         ${fieldIn('name', '앱 이름', true, `<input class="input" data-k="name" maxlength="80" value="${esc(w.name)}" placeholder="예: vSAN ESA 용량 계산기">`)}
         ${fieldIn('author', '작성자 이름', true, `<input class="input" data-k="author" maxlength="40" value="${esc(w.author)}" placeholder="표시될 이름 또는 닉네임">`)}
         ${isAdmin() && (w.editId || role() === 'owner') ? fieldIn('email', '작성자 이메일', false, `<input class="input" data-k="email" type="email" maxlength="120" value="${esc(w.email)}" placeholder="name@example.com">`, '관리자에게만 보이며, 승인 관련 연락에 사용됩니다.')
@@ -1204,14 +1226,24 @@
         ${fieldIn('category', '카테고리', true, `<select class="select" data-k="category"><option value="">선택하세요</option>${CATS.map((c) => `<option value="${esc(c.k)}" ${w.category === c.k ? 'selected' : ''}>${c.ko}</option>`).join('')}</select>`)}
         ${fieldIn('description', '설명', true, `<textarea class="textarea" data-k="description" maxlength="2000" placeholder="무엇을 하는 앱인지, 사용법과 참고 사항을 적어 주세요.">${esc(w.description)}</textarea>`)}
         ${fieldIn('tags', L('태그', 'Tags'), false, `<input class="input" data-k="tags" maxlength="120" value="${esc(w.tags)}" placeholder="${L('예: vsan, sizing, 계산기', 'e.g. vsan, sizing, calculator')}">`, L('쉼표로 구분, 최대 5개 · 각 20자 이하. 검색과 태그 페이지에 사용됩니다.', 'Comma-separated, up to 5, 20 characters each. Used for search and tag pages.'))}
-        ${fieldIn('thumbnail', '썸네일 URL', false, `<input class="input" data-k="thumbnail" maxlength="500" value="${esc(w.thumbnail)}" placeholder="https://… (비워 두면 그라데이션 자동 생성)">`, '이미지 https 주소. 비워 두면 카테고리 아이콘이 들어간 그라데이션 썸네일이 자동 생성됩니다.')}`;
+        ${fieldIn('thumbnail', '썸네일 URL', false, `<input class="input" data-k="thumbnail" maxlength="500" value="${esc(w.thumbnail)}" placeholder="https://… (비워 두면 그라데이션 자동 생성)">`, '이미지 https 주소. 비워 두면 첫 번째 스크린샷, 그것도 없으면 그라데이션 썸네일이 자동으로 쓰입니다.')}
+        ${fieldIn('screenshots', L('스크린샷', 'Screenshots'), false, '<div class="shots-ed" id="shotsEd"></div>', L(`최대 ${MAX_SHOTS}장 · 이미지 파일을 올리거나(자동 축소, 장당 2MB 이하) https 이미지 주소를 추가하세요. 끌어다 놓기·붙여넣기도 됩니다. 첫 장이 대표 이미지입니다.`, `Up to ${MAX_SHOTS} · upload image files (auto-resized, 2 MB max each) or add https image URLs. Drag-and-drop and paste work too. The first one is the cover.`))}`;
       bindWizInputs(body);
+      renderShotsEd();
+      $('#ghUrl').oninput = (e) => { w.ghUrl = e.target.value; };
+      $('#ghUrl').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); ghImport(); } };
+      $('#ghGo').onclick = ghImport;
     }
     if (w.step === 3) {
       if (w.type === 'link') {
-        body.innerHTML = `<h3>앱 URL</h3><p class="hint">실행 시 새 탭으로 열릴 웹앱 주소를 입력하세요.</p>
-          ${fieldIn('url', '앱 URL', true, `<input class="input" data-k="url" maxlength="1000" value="${esc(w.url)}" placeholder="https://example.com/my-app">`, 'https:// 로 시작하는 주소만 허용됩니다.')}
+        body.innerHTML = `<h3>${L('앱 URL · 데모 접속', 'App URL & demo access')}</h3><p class="hint">${L('카탈로그에 걸릴 주소와, 사용자가 바로 실행해 볼 수 있는 데모 정보를 입력하세요.', 'Enter the catalog address and the demo users can run right away.')}</p>
+          ${fieldIn('url', '앱 URL', true, `<input class="input" data-k="url" maxlength="1000" value="${esc(w.url)}" placeholder="https://example.com/my-app">`, L('카탈로그의 "앱 실행" 버튼이 여는 주소입니다. https:// 만 허용됩니다.', 'Opened by the catalog "Run app" button. https:// only.'))}
+          ${fieldIn('demoUrl', L('데모 URL', 'Demo URL'), true, `<div class="inline-row"><input class="input" data-k="demoUrl" maxlength="1000" value="${esc(w.demoUrl)}" placeholder="https://demo.example.com"><button type="button" class="btn btn-sm" id="sameUrl">${L('앱 URL과 같음', 'Same as app URL')}</button></div>`, L('지금 바로 실행해 볼 수 있는 주소입니다. 사내·랩 환경이면 http:// 도 가능합니다.', 'An address that can be run right now. http:// is allowed for internal/lab environments.'))}
+          ${fieldIn('accessGuide', L('접속 방법', 'How to access'), true, `<textarea class="textarea" data-k="accessGuide" maxlength="2000" rows="5" placeholder="${L('예)\n1. 사내 VPN 접속 후 데모 URL 열기\n2. 테스트 계정: demo@krvcf.com / Demo!2026\n3. Chrome 최신 버전 권장, 데모 데이터는 매일 03시 초기화', 'e.g.\n1. Connect to the corporate VPN, then open the demo URL\n2. Test account: demo@krvcf.com / Demo!2026\n3. Latest Chrome recommended; demo data resets daily at 03:00')}">${esc(w.accessGuide)}</textarea>`, L('필요한 네트워크(VPN·내부망), 테스트 계정, 권장 브라우저, 데모 시나리오 등을 적어 주세요.', 'Network (VPN/internal), test account, recommended browser, demo scenario, etc.'))}
+          <label class="check" style="margin:-4px 0 16px"><input type="checkbox" id="accPriv" ${w.accessPrivate ? 'checked' : ''}><span>${L('접속 방법은 <b>로그인한 사용자에게만</b> 보이기 (계정·비밀번호를 적었다면 권장)', 'Show the access guide <b>only to signed-in users</b> (recommended if it contains credentials)')}</span></label>
           ${fieldIn('changelog', L('변경 내용', 'Change note'), false, `<input class="input" data-k="changelog" maxlength="300" value="${esc(w.changelog)}" placeholder="${w.editId ? L('예: 계산 오류 수정, 다크 모드 추가', 'e.g. Fixed calculation bug, added dark mode') : L('예: 최초 버전', 'e.g. Initial release')}">`, L('버전 기록에 표시됩니다.', 'Shown in the version history.'))}`;
+        $('#accPriv').onchange = (e) => { w.accessPrivate = e.target.checked; };
+        $('#sameUrl').onclick = () => { const i = $('[data-k="demoUrl"]', body); i.value = w.demoUrl = w.url.trim(); i.focus(); };
         bindWizInputs(body);
       } else {
         body.innerHTML = `<h3>HTML 소스</h3><p class="hint">단일 HTML 파일을 업로드하거나 코드를 붙여넣으세요. CSS/JS는 파일 안에 포함하거나 CDN을 사용하세요.</p>
@@ -1239,8 +1271,10 @@
     if (w.step === 4) {
       const rows = [
         ['유형', w.type === 'html' ? '데모룸 · HTML 시뮬레이터' : '카탈로그 · 외부 웹 링크'], ['앱 이름', w.name], ['작성자', w.author], [L('소유자 계정', 'Owner account'), w.email || '-'],
-        ['카테고리', catLabel(w.category)], [L('태그', 'Tags'), normTags(w.tags).map((t) => '#' + t).join(' ') || '-'], ['썸네일', w.thumbnail || '자동 생성'],
+        ['카테고리', catLabel(w.category)], [L('태그', 'Tags'), normTags(w.tags).map((t) => '#' + t).join(' ') || '-'], ['썸네일', w.thumbnail || (w.screenshots.length ? L('첫 번째 스크린샷', 'First screenshot') : '자동 생성')],
+        [L('스크린샷', 'Screenshots'), w.screenshots.length ? L(`${w.screenshots.length}장`, `${w.screenshots.length}`) : '-'],
         ...(w.changelog ? [[L('변경 내용', 'Change note'), w.changelog]] : []),
+        ...(w.type === 'link' ? [[L('데모 URL', 'Demo URL'), w.demoUrl], [L('접속 방법', 'How to access') + (w.accessPrivate ? L(' (로그인 사용자만)', ' (signed-in only)') : ''), w.accessGuide]] : []),
         w.type === 'link' ? ['URL', w.url] : ['HTML', `${w.fileName || '-'} (${fmtSize(byteLen(w.html))})${w.editId && !w.htmlChanged ? ' · 변경 없음' : ''}`],
         ['설명', w.description],
       ];
@@ -1285,6 +1319,114 @@
     const m = modal({ title: `미리보기 — ${esc(wiz.name || wiz.fileName || 'HTML')}`, cls: 'wide', body: '<iframe sandbox="allow-scripts allow-forms allow-modals allow-popups" referrerpolicy="no-referrer"></iframe>' });
     $('iframe', m.el).srcdoc = wiz.html;
   }
+
+  /* ───────── v11: GitHub import + screenshots ───────── */
+  const MAX_SHOTS = 8;
+  function ghResHtml() {
+    const r = wiz && wiz.ghRes; if (!r) return '';
+    const why = r.ai ? L(`AI(${r.model})가 작성했습니다. 내용을 확인하고 고치세요.`, `Drafted by AI (${r.model}). Please review and edit.`)
+      : r.reason === 'ai_error' ? L(`AI 호출에 실패해 README 기준으로 채웠습니다 (${r.error || ''}).`, `AI call failed, filled from the README (${r.error || ''}).`)
+      : r.reason === 'daily_limit' ? L('오늘 AI 사용 한도를 넘어 README 기준으로 채웠습니다.', 'Daily AI limit reached; filled from the README.')
+      : L('README 기준으로 채웠습니다.', 'Filled from the README.');
+    return `<div class="gh-res">${ico('check', 13)}<div><a href="${esc(r.repo.url)}" target="_blank" rel="noopener" data-notr>${esc(r.repo.fullName)}</a> · ★ ${fmtNum(r.repo.stars)}${r.repo.language ? ` · <span data-notr>${esc(r.repo.language)}</span>` : ''} · ${L(`스크린샷 ${r.added}장 추가`, `${r.added} screenshot(s) added`)}<br><span class="t2">${esc(why)}</span></div></div>`;
+  }
+  async function ghImport() {
+    const w = wiz; const url = ($('#ghUrl').value || '').trim(); w.ghUrl = url;
+    if (!url) return toast(L('GitHub 저장소 주소를 입력하세요.', 'Enter a GitHub repository URL.'), 'error');
+    const btn = $('#ghGo'); btn.disabled = true;
+    let d;
+    try { d = await runTask(L('GitHub 불러오기', 'GitHub import'), url, () => api('/api/my/github-import', { method: 'POST', body: { url } })); }
+    catch (_) { btn.disabled = false; return; }
+    const dr = d.draft || {};
+    const filled = ['name', 'description'].some((k) => (w[k] || '').trim()) || normTags(w.tags).length || w.category;
+    const overwrite = !filled || (await confirmBox(L('GitHub 내용 적용', 'Apply GitHub content'), L('이미 입력한 이름·설명·태그·카테고리를 GitHub에서 가져온 내용으로 바꿀까요?<br><span class="t2">취소하면 비어 있는 칸만 채웁니다.</span>', 'Replace the name, description, tags and category you already entered with the imported content?<br><span class="t2">Cancel fills only the empty fields.</span>'), L('바꾸기', 'Replace')));
+    const put = (k, v) => { if (v && (overwrite || !String(w[k] || '').trim())) w[k] = v; };
+    put('name', dr.name); put('description', dr.description); put('tags', (dr.tags || []).join(', ')); put('category', dr.category);
+    if (dr.demoUrl && !w.demoUrl) w.demoUrl = dr.demoUrl;
+    if (dr.accessGuide && !w.accessGuide) w.accessGuide = dr.accessGuide;
+    if (w.type === 'link' && !w.url) w.url = d.repo.homepage && /^https:/i.test(d.repo.homepage) ? d.repo.homepage : d.repo.pagesUrl || d.repo.url;
+    let added = 0;
+    for (const im of d.repo.images || []) {
+      if (w.screenshots.length >= MAX_SHOTS) break;
+      if (w.screenshots.some((x) => x.url === im.url)) continue;
+      w.screenshots.push(im.caption ? { url: im.url, caption: im.caption } : { url: im.url }); added++;
+    }
+    w.ghRes = { ...d, added };
+    renderWizard();
+    toast(d.ai ? L('AI가 작성한 내용을 채웠습니다. 확인 후 다음으로 진행하세요.', 'AI draft applied. Review it, then continue.') : L('GitHub 내용을 채웠습니다.', 'GitHub content applied.'), 'success');
+  }
+  function renderShotsEd() {
+    const el = $('#shotsEd'); if (!el) return;
+    const w = wiz; const n = w.screenshots.length;
+    el.innerHTML = `${w.screenshots.map((x, i) => `<div class="shot-it">
+        <img src="${esc(x.url)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.classList.add('bad')">
+        ${i === 0 ? `<span class="lbl approved cover">${L('대표', 'Cover')}</span>` : ''}
+        <div class="shot-bar"><button type="button" class="icon-btn" data-mv="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} title="${L('앞으로', 'Move left')}">‹</button><button type="button" class="icon-btn" data-mv="${i}" data-d="1" ${i === n - 1 ? 'disabled' : ''} title="${L('뒤로', 'Move right')}">›</button><span class="sp"></span><button type="button" class="icon-btn" data-rm="${i}" title="${L('삭제', 'Remove')}">${ico('x', 13)}</button></div>
+        <input class="input cap" data-cap="${i}" maxlength="120" value="${esc(x.caption || '')}" placeholder="${L('설명 (선택)', 'Caption (optional)')}">
+      </div>`).join('')}
+      ${n < MAX_SHOTS ? `<label class="shot-add" title="${L('이미지 업로드', 'Upload images')}"><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden id="shotFile">${ico('up', 22)}<span>${L('이미지 올리기', 'Upload')}</span></label>
+        <button type="button" class="shot-add" id="shotUrl">${ico('link', 20)}<span>${L('URL 추가', 'Add URL')}</span></button>` : ''}`;
+    el.onclick = (e) => {
+      const mv = e.target.closest('[data-mv]'); const rm = e.target.closest('[data-rm]');
+      if (mv) { const i = +mv.dataset.mv, j = i + +mv.dataset.d; [w.screenshots[i], w.screenshots[j]] = [w.screenshots[j], w.screenshots[i]]; renderShotsEd(); }
+      if (rm) { w.screenshots.splice(+rm.dataset.rm, 1); renderShotsEd(); }
+    };
+    $$('[data-cap]', el).forEach((inp) => (inp.oninput = () => { const x = w.screenshots[+inp.dataset.cap]; if (inp.value.trim()) x.caption = inp.value; else delete x.caption; }));
+    if ($('#shotFile')) $('#shotFile').onchange = (e) => { addShotFiles([...e.target.files]); e.target.value = ''; };
+    if ($('#shotUrl')) $('#shotUrl').onclick = async () => {
+      const u = ((await promptBox(L('스크린샷 URL', 'Screenshot URL'), L('https:// 로 시작하는 이미지 주소', 'Image address starting with https://'), { placeholder: 'https://…/screen.png' })) || '').trim();
+      if (!u) return;
+      if (!/^https:\/\/\S+$/i.test(u)) return toast(L('https:// 이미지 주소만 추가할 수 있습니다.', 'Only https:// image URLs can be added.'), 'error');
+      w.screenshots.push({ url: u.replace(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\//i, 'https://raw.githubusercontent.com/$1/$2/') }); renderShotsEd();
+    };
+    el.ondragover = (e) => { e.preventDefault(); el.classList.add('over'); };
+    el.ondragleave = () => el.classList.remove('over');
+    el.ondrop = (e) => { e.preventDefault(); el.classList.remove('over'); addShotFiles([...e.dataTransfer.files]); };
+    el.onpaste = (e) => { const fs = [...(e.clipboardData || {}).files || []]; if (fs.length) { e.preventDefault(); addShotFiles(fs); } };
+    el.tabIndex = -1;
+  }
+  async function shrinkImage(file) {
+    const LIMIT = 2 * 1024 * 1024;
+    if (file.type === 'image/gif' && file.size <= LIMIT) return file; // keep animation
+    const bmp = await createImageBitmap(file);
+    for (const [maxW, q] of [[1920, 0.86], [1600, 0.8], [1280, 0.75], [1024, 0.7]]) {
+      const k = Math.min(1, maxW / Math.max(bmp.width, bmp.height));
+      if (k === 1 && file.size <= LIMIT && /^image\/(png|jpeg|webp)$/.test(file.type) && file.size < 600 * 1024) return file;
+      const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+      cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+      const blob = await new Promise((r) => cv.toBlob(r, 'image/webp', q)) || await new Promise((r) => cv.toBlob(r, 'image/jpeg', q));
+      if (blob && blob.size <= LIMIT) return blob;
+    }
+    throw new Error(L('이미지를 2MB 이하로 줄이지 못했습니다.', 'Could not shrink the image below 2 MB.'));
+  }
+  async function addShotFiles(files) {
+    const w = wiz;
+    const imgs = files.filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
+    if (!imgs.length) return toast(L('PNG, JPEG, GIF, WebP 이미지만 올릴 수 있습니다.', 'Only PNG, JPEG, GIF and WebP images can be uploaded.'), 'error');
+    const room = MAX_SHOTS - w.screenshots.length;
+    if (imgs.length > room) toast(L(`최대 ${MAX_SHOTS}장까지라 ${room}장만 올립니다.`, `Max ${MAX_SHOTS}; uploading ${room}.`), 'error');
+    for (const f of imgs.slice(0, Math.max(0, room))) {
+      try {
+        const d = await runTask(L('스크린샷 업로드', 'Screenshot upload'), f.name, async () => api('/api/my/images', { method: 'POST', body: await shrinkImage(f) }));
+        w.screenshots.push({ url: API + d.path }); renderShotsEd();
+      } catch (_) { /* toast shown */ }
+    }
+  }
+  function shotGallery(app) {
+    const sh = app.screenshots || []; if (!sh.length) return '';
+    return `<div class="portlet" style="margin-bottom:16px"><div class="portlet-hd">${ico('monitor')} ${L('스크린샷', 'Screenshots')}<span class="acts" style="font-size:12.5px;color:var(--muted)">${sh.length}</span></div><div class="portlet-bd"><div class="shots">
+      ${sh.map((x, i) => `<button type="button" class="shot" data-shot="${i}" title="${esc(x.caption || '')}"><img src="${esc(x.url)}" alt="${esc(x.caption || '')}" loading="lazy" referrerpolicy="no-referrer">${x.caption ? `<span class="cap" data-notr>${esc(x.caption)}</span>` : ''}</button>`).join('')}</div></div></div>`;
+  }
+  function openShot(app, i) {
+    const sh = app.screenshots || [];
+    const m = modal({ raw: true, bgCls: 'shot-bg', body: `<div class="shot-view" role="dialog" aria-modal="true"><button class="hdr-btn x" data-close title="${L('닫기', 'Close')}">${ico('x', 18)}</button>
+      ${sh.length > 1 ? `<button class="nav prev" data-nav="-1">‹</button><button class="nav next" data-nav="1">›</button>` : ''}<figure><img referrerpolicy="no-referrer"><figcaption data-notr></figcaption></figure></div>` });
+    const show = () => { const x = sh[i]; $('img', m.el).src = x.url; $('figcaption', m.el).textContent = `${i + 1} / ${sh.length}${x.caption ? ' · ' + x.caption : ''}`; };
+    m.el.onclick = (e) => { const n = e.target.closest('[data-nav]'); if (n) { i = (i + +n.dataset.nav + sh.length) % sh.length; show(); } else if (e.target.closest('[data-close]') || e.target === m.el.firstElementChild) m.close(); };
+    const key = (e) => { if (!document.body.contains(m.el)) return document.removeEventListener('keydown', key); if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { i = (i + (e.key === 'ArrowRight' ? 1 : -1) + sh.length) % sh.length; show(); } };
+    document.addEventListener('keydown', key);
+    show();
+  }
   function renderFt() {
     const w = wiz;
     $('#wizFt').innerHTML = `<button class="btn btn-link left" id="wCancel">취소</button>
@@ -1307,6 +1449,8 @@
     }
     if (s === 3) {
       if (w.type === 'link' && !/^https:\/\/[^\s]+\.[^\s]+/i.test(w.url.trim())) return 'https:// 로 시작하는 URL을 입력하세요.';
+      if (w.type === 'link' && !/^https?:\/\/[^\s/]+/i.test(w.demoUrl.trim())) return L('실행 가능한 데모 URL을 입력하세요 (http:// 또는 https://).', 'Enter a runnable demo URL (http:// or https://).');
+      if (w.type === 'link' && !w.accessGuide.trim()) return L('데모 접속 방법을 입력하세요.', 'Describe how to access the demo.');
       if (w.type === 'html' && !w.html.trim()) return 'HTML 파일을 업로드하거나 코드를 붙여넣으세요.';
       if (w.type === 'html' && byteLen(w.html) > MAX_HTML) return 'HTML은 10MB 이하만 가능합니다.';
     }
@@ -1316,7 +1460,8 @@
     const w = wiz;
     const btn = $('#wDone'); btn.disabled = true; btn.textContent = '처리 중…';
     ls.set('krvcf.author', w.author.trim()); if (role() === 'owner') ls.set('krvcf.email', w.email.trim());
-    const body = { type: w.type, name: w.name, author: w.author, email: w.email, category: w.category, description: w.description, thumbnail: w.thumbnail, url: w.url, tags: normTags(w.tags), changelog: w.changelog };
+    const body = { type: w.type, name: w.name, author: w.author, email: w.email, category: w.category, description: w.description, thumbnail: w.thumbnail, url: w.url, tags: normTags(w.tags), changelog: w.changelog, screenshots: w.screenshots,
+      ...(w.type === 'link' || w.demoUrl || w.accessGuide ? { demoUrl: w.demoUrl.trim(), accessGuide: w.accessGuide.trim(), accessPrivate: w.accessPrivate } : {}) };
     if (w.type === 'html' && (!w.editId || w.htmlChanged)) body.html = w.html;
     try {
       if (w.editId) {
@@ -1595,6 +1740,7 @@
         <dt>${L('소유자 계정', 'Owner account')}</dt><dd data-notr>${esc(d.owner || L('미연결 (소유 키 방식)', 'Not linked (owner key)'))}</dd>
         <dt>${L('태그', 'Tags')}</dt><dd data-notr>${(a.tags || []).map((t) => '#' + esc(t)).join(' ') || '-'}</dd>
         ${a.type === 'link' ? `<dt>URL</dt><dd><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a></dd>` : `<dt>${L('파일 크기', 'File size')}</dt><dd>${fmtSize(a.size)}</dd>`}
+        ${a.demoUrl ? `<dt>${L('데모 URL', 'Demo URL')}</dt><dd><a href="${esc(a.demoUrl)}" target="_blank" rel="noopener" data-notr>${esc(a.demoUrl)}</a></dd>` : ''}${a.accessGuide ? `<dt>${L('접속 방법', 'How to access')}${a.accessPrivate ? L(' (로그인 전용)', ' (signed-in)') : ''}</dt><dd class="desc-full" data-notr>${esc(a.accessGuide)}</dd>` : a.type === 'link' ? `<dt>${L('접속 방법', 'How to access')}</dt><dd class="t2">${L('미입력 (다음 수정 때 필수)', 'Missing (required on next edit)')}</dd>` : ''}
         <dt>${L('등록일', 'Created')}</dt><dd>${fmtFull(a.createdAt)}</dd>
       </dl><p class="t2" style="margin:12px 0 0;font-size:12.5px">${L('관리자가 아닌 소유자가 수정하면 다시 승인 대기 상태가 됩니다.', 'Edits by owners send the app back for review.')}</p></div></div>
       <div class="portlet danger-zone"><div class="portlet-hd">${ico('trash')} ${L('위험 구역', 'Danger zone')}</div><div class="portlet-bd">
@@ -1816,7 +1962,7 @@
       title: `앱 검토 — ${esc(a.name)}`,
       body: `<dl class="kv" style="margin-bottom:12px"><dt>유형</dt><dd>${TYPE_LABEL[a.type]} · ${esc(catLabel(a.category))}</dd><dt>작성자</dt><dd>${esc(a.author)}${a.email ? ` · ${esc(a.email)}` : ' · 이메일 없음(결과 메일 미발송)'}</dd>
         <dt>${L('소유자 계정', 'Owner account')}</dt><dd>${a.owner ? `${esc(a.owner)} <span class="lbl approved">Google</span>` : L('미연결 (소유 키 방식)', 'Not linked (owner key)')}${isAdmin() ? ` <button class="btn btn-sm btn-link" data-own>${L('변경', 'Change')}</button>` : ''}</dd>
-        <dt>현재 상태</dt><dd><span class="lbl ${a.status}">${STATUS_LABEL[a.status]}</span></dd>${a.type === 'link' ? `<dt>URL</dt><dd><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a></dd>` : `<dt>크기</dt><dd>${fmtSize(a.size)}</dd>`}<dt>등록 · 수정</dt><dd>${fmtFull(a.createdAt)} · ${fmtFull(a.updatedAt)}</dd></dl>
+        <dt>현재 상태</dt><dd><span class="lbl ${a.status}">${STATUS_LABEL[a.status]}</span></dd>${a.type === 'link' ? `<dt>URL</dt><dd><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a></dd>` : `<dt>크기</dt><dd>${fmtSize(a.size)}</dd>`}${a.demoUrl ? `<dt>${L('데모 URL', 'Demo URL')}</dt><dd><a href="${esc(a.demoUrl)}" target="_blank" rel="noopener" data-notr>${esc(a.demoUrl)}</a></dd>` : ''}${a.accessGuide ? `<dt>${L('접속 방법', 'How to access')}${a.accessPrivate ? L(' (로그인 전용)', ' (signed-in)') : ''}</dt><dd class="desc-full" data-notr>${esc(a.accessGuide)}</dd>` : a.type === 'link' ? `<dt>${L('접속 방법', 'How to access')}</dt><dd class="t2">${L('미입력 (다음 수정 때 필수)', 'Missing (required on next edit)')}</dd>` : ''}<dt>등록 · 수정</dt><dd>${fmtFull(a.createdAt)} · ${fmtFull(a.updatedAt)}</dd></dl>
         <p class="desc-full" style="background:var(--panel-2);padding:10px;border-radius:3px;max-height:140px;overflow:auto">${esc(a.description)}</p>
         ${a.approvedVersion && a.approvedVersion !== a.version ? `<div class="ownerbar" style="margin:10px 0 0">${ico('git', 16)}<span>${L(`마지막 승인 버전 v${a.approvedVersion} 이후 소스가 바뀌었습니다 (현재 v${a.version}).`, `The source changed since the last approved v${a.approvedVersion} (now v${a.version}).`)}</span><button class="btn btn-sm btn-primary" data-df>${L('변경 비교', 'Compare changes')}</button></div>` : !a.approvedVersion && a.status === 'pending' ? `<div class="t2" style="margin-top:10px;font-size:12.5px">${ico('plus', 12)} ${L('처음 승인 요청된 신규 앱입니다.', 'New app awaiting its first approval.')}</div>` : ''}
         ${a.type === 'link' && a.linkStatus ? `<div style="margin-top:8px;font-size:12.5px">${a.linkStatus === 'broken' ? `<span class="lbl rejected">${ico('link', 10)} ${L('연결 불가', 'Unreachable')}</span> <span data-notr>${esc(a.linkError || '')}</span>` : `<span class="lbl approved">${ico('link', 10)} ${L('연결 정상', 'Reachable')}</span>`} <span class="t2">${fmtTime(a.linkCheckedAt)}</span></div>` : ''}
@@ -2126,9 +2272,11 @@
         <div class="field" style="grid-template-columns:150px 1fr"><label>Webhook URL</label><input class="input mono" id="sHook" maxlength="500" value="${esc(s.webhook_url || '')}" placeholder="https://chat.googleapis.com/v1/spaces/…"></div>
         <div class="field" style="grid-template-columns:150px 1fr"><label>${L('이벤트', 'Events')}</label><div class="checks">${[['submit', L('신규 등록·재승인 요청', 'New submission / resubmission')], ['decision', L('승인·반려 결정', 'Approval decision')], ['report', L('앱 신고', 'App report')], ['comment', L('새 리뷰', 'New review')]].map(([k, t]) => `<label class="radio"><input type="checkbox" data-hev="${k}" ${(s.webhook_events || '').split(',').includes(k) ? 'checked' : ''}> ${t}</label>`).join('')}</div></div>
         <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sm" id="hookTest">${ico('send', 12)} ${L('테스트 전송', 'Send test')}</button><button class="btn btn-primary btn-sm" id="hookSave">${L('저장', 'Save')}</button></div></div></div>
+      ${isAdmin() ? `<div class="portlet" style="margin-bottom:16px" id="aiBox"><div class="portlet-hd">${ico('star')} ${L('AI 모델 — GitHub 설명 자동 작성', 'AI model — GitHub description drafting')}</div><div class="portlet-bd"><div class="skel" style="height:120px"></div></div></div>` : ''}
       <div class="portlet"><div class="portlet-hd">${ico('wrench')} 연동 상태<span class="acts" style="font-size:12.5px;color:var(--muted)">API 버전 <span class="mono">${esc(String(v.version).slice(0, 7))}</span></span></div><div class="portlet-bd flush">
         <table class="grid"><tbody>${integ.map(([n, k, ok, dsc]) => `<tr><td><span class="${ok ? 'ok-dot' : 'no-dot'}"></span><b>${n}</b> <span class="mono" style="color:var(--muted);font-size:11.5px">${k}</span></td><td>${ok ? '<span class="res-ok">설정됨</span>' : '<span style="color:var(--muted)">미설정</span>'}</td><td style="color:var(--muted);font-size:12.5px;white-space:normal">${esc(dsc)}</td></tr>`).join('')}</tbody></table>
         <div style="padding:12px 16px;display:flex;gap:8px;align-items:center;border-top:1px solid var(--border-2)"><span style="font-size:12.5px;color:var(--muted);flex:1">시크릿은 GitHub 저장소 Secrets에 등록하면 다음 API 배포(패치 탭 → API 재배포)에 자동 반영됩니다.</span>${v.mail ? `<button class="btn btn-sm" id="testMail">${ico('mail', 12)} 테스트 메일</button>` : ''}</div></div></div>`;
+    if ($('#aiBox')) aiSettings($('#aiBox'));
     const save = (patch) => runTask('설정 변경', Object.keys(patch).join(', '), () => api('/api/admin/settings', { method: 'PUT', body: patch }))
       .then(async () => { toast('설정을 저장했습니다.', 'success'); await loadConfig(); }).catch(() => tabSettings(el));
     $('#hookSave').onclick = () => save({ webhook_url: $('#sHook').value.trim(), webhook_events: $$('[data-hev]', el).filter((x) => x.checked).map((x) => x.dataset.hev).join(',') });
@@ -2143,6 +2291,36 @@
     };
   }
 
+
+  async function aiSettings(box) {
+    const bd = $('.portlet-bd', box);
+    let a; try { a = (await api('/api/admin/ai')).ai; } catch (e) { bd.innerHTML = `<div class="alert danger">${esc(e.message)}</div>`; return; }
+    const P = a.providers;
+    const row = (label, html, help) => `<div class="field" style="grid-template-columns:150px 1fr"><label>${label}</label><div>${html}${help ? `<div class="help">${help}</div>` : ''}</div></div>`;
+    bd.innerHTML = `<p class="t2" style="margin-top:0">${L('앱 등록 화면의 <b>GitHub에서 불러오기</b>가 이 모델로 README를 읽고 이름·설명·태그·카테고리·데모 URL·접속 방법 초안을 씁니다. API 키는 암호화해 DB에 저장하며 화면·로그에 다시 표시하지 않습니다.', '<b>Import from GitHub</b> on the submit page uses this model to read the README and draft the name, description, tags, category, demo URL and access guide. The API key is stored encrypted and never shown or logged again.')}</p>
+      ${row(L('사용', 'Enabled'), `<label class="switch"><input type="checkbox" id="aiOn" ${a.enabled ? 'checked' : ''}><i></i></label>`)}
+      ${row(L('제공자', 'Provider'), `<select class="select" id="aiProv"><option value="">${L('선택하세요', 'Choose')}</option>${Object.entries(P).map(([k, v]) => `<option value="${k}" ${a.provider === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select>`)}
+      ${row(L('API 주소', 'API base URL'), `<input class="input mono" id="aiBase" maxlength="300" value="${esc(a.baseUrl || '')}">`, L('비우면 제공자 기본 주소를 씁니다. OpenAI 호환(vLLM·Azure 등)은 필수이며 Cloudflare에서 접근 가능한 https 주소여야 합니다.', 'Empty = provider default. Required for OpenAI-compatible (vLLM, Azure…); must be https and reachable from Cloudflare.'))}
+      ${row(L('API 키', 'API key'), `<div class="inline-row"><input class="input mono" id="aiKey" type="password" autocomplete="new-password" placeholder="${a.keySet ? L(`설정됨 ${a.keyHint} — 바꿀 때만 입력`, `Set ${a.keyHint} — type only to replace`) : L('미설정', 'Not set')}">${a.keySet ? `<button type="button" class="btn btn-sm" id="aiClear">${L('키 삭제', 'Remove key')}</button>` : ''}</div>`)}
+      ${row(L('모델', 'Model'), `<div class="inline-row"><input class="input mono" id="aiModel" list="aiModels" maxlength="120" value="${esc(a.model || '')}" placeholder="${L('모델 ID — [목록]으로 불러오기', 'Model ID — use [List]')}"><datalist id="aiModels"></datalist><button type="button" class="btn btn-sm" id="aiList">${L('목록', 'List')}</button></div>`, L('제공자의 모델 목록 API에서 실제 사용 가능한 ID를 불러옵니다. 빠르고 저렴한 모델이면 충분합니다.', 'Loads the IDs your key can actually use from the provider. A fast, inexpensive model is enough.'))}
+      ${row(L('하루 한도', 'Daily limit'), `<input class="input" id="aiLimit" type="number" min="1" max="5000" value="${esc(a.dailyLimit)}" style="max-width:140px">`, L('전체 사용자 합계 AI 호출 수(일반 사용자는 별도로 1인당 하루 30회). 넘으면 README 기준으로만 채웁니다.', 'Total AI calls per day across users (each user is also limited to 30/day). Beyond it, only the README is used.'))}
+      <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center"><span class="t2" style="flex:1;font-size:12.5px">${a.updatedAt ? L(`최종 변경 ${fmtFull(a.updatedAt)} · ${esc(a.updatedBy || '')}`, `Last changed ${fmtFull(a.updatedAt)} · ${esc(a.updatedBy || '')}`) : ''}</span>
+        <button class="btn btn-sm" id="aiTest">${ico('send', 12)} ${L('연결 테스트', 'Test')}</button><button class="btn btn-primary btn-sm" id="aiSave">${L('저장', 'Save')}</button></div>`;
+    const form = () => ({ provider: $('#aiProv', bd).value, baseUrl: $('#aiBase', bd).value.trim(), model: $('#aiModel', bd).value.trim(), apiKey: $('#aiKey', bd).value.trim() });
+    const syncBase = () => { const p = P[$('#aiProv', bd).value]; $('#aiBase', bd).placeholder = p && p.base ? p.base : 'https://…/v1'; };
+    $('#aiProv', bd).onchange = syncBase; syncBase();
+    $('#aiList', bd).onclick = () => runTask(L('모델 목록', 'Model list'), $('#aiProv', bd).value || '-', () => api('/api/admin/ai/models', { method: 'POST', body: form() }))
+      .then((d) => { $('#aiModels', bd).innerHTML = d.models.map((m) => `<option value="${esc(m)}">`).join(''); toast(L(`모델 ${d.models.length}개를 불러왔습니다. 모델 칸을 눌러 고르세요.`, `${d.models.length} models loaded. Click the model field to pick one.`), 'success'); $('#aiModel', bd).focus(); }).catch(() => {});
+    $('#aiTest', bd).onclick = () => runTask(L('AI 연결 테스트', 'AI test'), $('#aiModel', bd).value || '-', () => api('/api/admin/ai/test', { method: 'POST', body: form() }))
+      .then((d) => toast(L(`성공 (${d.ms}ms): ${d.reply}`, `OK (${d.ms} ms): ${d.reply}`), 'success', 6000)).catch(() => {});
+    $('#aiSave', bd).onclick = () => runTask(L('AI 설정 저장', 'Save AI settings'), $('#aiModel', bd).value || '-', () => api('/api/admin/ai', { method: 'PUT', body: { ...form(), enabled: $('#aiOn', bd).checked, dailyLimit: $('#aiLimit', bd).value } }))
+      .then(async () => { toast(L('AI 설정을 저장했습니다.', 'AI settings saved.'), 'success'); await loadConfig(); aiSettings(box); }).catch(() => {});
+    if ($('#aiClear', bd)) $('#aiClear', bd).onclick = async () => {
+      if (!(await confirmBox(L('API 키 삭제', 'Remove API key'), L('저장된 API 키를 지우고 AI 작성을 끕니다.', 'Removes the stored API key and turns AI drafting off.'), L('삭제', 'Remove'), true))) return;
+      runTask(L('API 키 삭제', 'Remove API key'), 'AI', () => api('/api/admin/ai', { method: 'PUT', body: { ...form(), apiKey: '', clearKey: true, enabled: false, dailyLimit: $('#aiLimit', bd).value } }))
+        .then(async () => { await loadConfig(); aiSettings(box); }).catch(() => {});
+    };
+  }
   function tabBackup(el) {
     el.innerHTML = `<div class="portlets">
       <div class="portlet"><div class="portlet-hd">${ico('down')} 백업</div><div class="portlet-bd"><p style="margin-top:0;color:var(--text-2)">앱·HTML 소스·평점·피드백·승인자·승인 이력·설정을 하나의 JSON으로 내려받습니다. (감사 로그는 감사 로그 탭에서 CSV로 내보내기)</p><button class="btn btn-primary" id="bkDown">${ico('down', 14)} 백업 다운로드</button></div></div>

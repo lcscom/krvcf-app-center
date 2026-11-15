@@ -11,6 +11,8 @@
 
 const CATEGORIES = ['Compute', 'Storage', 'Network', 'Private AI', 'DR', 'Security', 'Dashboard', 'Tools', 'Code'];
 const MAX_HTML = 10 * 1024 * 1024;
+const MAX_SHOTS = 8;                 // screenshots per app
+const MAX_IMAGE = 2 * 1024 * 1024;   // per uploaded image (the browser resizes before upload)
 const ID_RE = '([a-z0-9]{6,16})';
 const TOKEN_TTL = 12 * 3600000;
 const USER_TOKEN_TTL = 7 * 86400000;
@@ -37,6 +39,14 @@ const MSG_EN = {
   '롤백할 커밋 sha 가 필요합니다.': 'A commit SHA to roll back to is required.', 'sha 가 필요합니다.': 'A commit SHA is required.', 'workflow 는 pages 또는 worker': 'workflow must be pages or worker',
   '메일 발송에 실패했습니다. RESEND_API_KEY / MAIL_FROM 도메인 인증을 확인하세요.': 'Email failed. Check RESEND_API_KEY and MAIL_FROM domain verification.',
   '바이너리 파일은 한 번에 35개까지 가능합니다 (Workers 무료 플랜 서브요청 한도).': 'Up to 35 binary files per patch (Workers free-plan subrequest limit).',
+  '데모 URL은 http:// 또는 https:// 로 시작하는 주소여야 합니다.': 'The demo URL must start with http:// or https://.', '실행 가능한 데모 URL을 입력하세요.': 'Enter a runnable demo URL.', '데모 접속 방법을 입력하세요.': 'Describe how to access the demo.',
+  'GitHub 저장소 주소를 입력하세요. 예: https://github.com/owner/repo': 'Enter a GitHub repository URL, e.g. https://github.com/owner/repo',
+  'GitHub 저장소를 찾을 수 없습니다 (비공개이거나 주소가 틀림).': 'GitHub repository not found (private or wrong address).',
+  'GitHub 불러오기 한도(하루 30회)를 초과했습니다.': 'GitHub import limit (30 per day) reached.',
+  'AI 모델이 설정되지 않았습니다.': 'No AI model is configured.', 'AI 모델 이름을 입력하세요.': 'Enter the AI model name.',
+  'AI API 주소는 https:// 여야 합니다.': 'The AI API base URL must use https://.', 'API 키가 없습니다.': 'No API key is set.',
+  '스크린샷은 https:// 이미지 주소만 허용됩니다.': 'Screenshots must be https:// image URLs.', '이미지는 2MB 이하만 올릴 수 있습니다.': 'Images must be 2 MB or smaller.',
+  'PNG, JPEG, GIF, WebP 이미지만 올릴 수 있습니다.': 'Only PNG, JPEG, GIF and WebP images can be uploaded.', '이미지 업로드 한도(하루 60장)를 초과했습니다.': 'Image upload limit (60 per day) reached.',
   '반려 사유를 입력하세요.': 'Please enter a rejection reason.', '백업 파일 형식이 올바르지 않습니다.': 'Invalid backup file.', '변경 사항이 없습니다 (현재 저장소와 동일).': 'No changes (identical to the repository).',
   '변경할 파일이 없습니다.': 'No files to change.', '본인은 삭제할 수 없습니다.': 'You cannot delete yourself.', '본인의 역할·상태는 변경할 수 없습니다.': 'You cannot change your own role or status.',
   '비밀번호 로그인이 설정되지 않았습니다.': 'Password sign-in is not configured.', '비밀번호가 올바르지 않습니다.': 'Incorrect password.', '상태 값이 올바르지 않습니다.': 'Invalid status.',
@@ -131,6 +141,7 @@ async function route(c) {
 
   if (p === '/' || p === '/api/health') return json({ ok: true, service: 'krvcf-app-api', version: c.env.VERSION || 'dev', time: Date.now() });
   if ((mm = p.match(new RegExp(`^/run/${ID_RE}$`)))) return runApp(c, mm[1]);
+  if ((mm = p.match(/^\/img\/([a-z0-9]{16})$/)) && (m === 'GET' || m === 'HEAD')) return serveImage(c, mm[1]);
 
   // public
   if (p === '/api/config' && m === 'GET') return publicConfig(c);
@@ -179,6 +190,8 @@ async function route(c) {
     if (!s) fail(401, '로그인이 필요합니다.');
     if (p === '/api/my/apps' && m === 'GET') return myApps(c, s);
     if (p === '/api/my/claim' && m === 'POST') return claimApps(c, s);
+    if (p === '/api/my/github-import' && m === 'POST') return githubImport(c, s);
+    if (p === '/api/my/images' && m === 'POST') return uploadImage(c, s);
     if (p === '/api/my/notifications' && m === 'GET') return myNotifications(c, s);
     if (p === '/api/my/notifications/read' && m === 'POST') return readNotifications(c, s);
     if (p === '/api/my/favs' && m === 'GET') return myFavs(c, s);
@@ -205,6 +218,7 @@ async function publicConfig(c) {
     submitRequiresLogin: true,
     notice: s.notice || '',
     autoApprove: s.auto_approve === 'true',
+    githubImport: { ai: await aiReady(c.env) },
     version: c.env.VERSION || 'dev',
   });
 }
@@ -250,7 +264,7 @@ async function getApp(c, id) {
   if (row.status !== 'approved' && level === 0) fail(404, '앱을 찾을 수 없습니다.');
   const s = await session(c);
   const manage = isAdmin(s) || isOwnerSession(s, row);
-  return json({ app: pub(row, level), manage, owned: isOwnerSession(s, row), claimable: !!s && !row.owner_email && s.r !== 'owner' });
+  return json({ app: pub(row, level, { guide: true, signedIn: !!s }), manage, owned: isOwnerSession(s, row), claimable: !!s && !row.owner_email && s.r !== 'owner' });
 }
 
 async function source(c, id) {
@@ -290,10 +304,11 @@ async function createApp(c) {
   if (v.type === 'html') { await env.HTML.put('html:' + id, v.html); await env.HTML.put(`html:${id}:v1`, v.html); }
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO apps (id,type,name,url,category,description,thumbnail,author_name,author_email,owner_key_hash,status,size,created_at,updated_at,reviewed_by,reviewed_at,tags,version,changelog,owner_email,approved_version)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`
+      `INSERT INTO apps (id,type,name,url,category,description,thumbnail,author_name,author_email,owner_key_hash,status,size,created_at,updated_at,reviewed_by,reviewed_at,tags,version,changelog,owner_email,approved_version,demo_url,access_guide,access_private,screenshots)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)`
     ).bind(id, v.type, v.name, v.url, v.category, v.description, v.thumbnail, v.author, ownerEmail || v.email, await sha256(key), status, v.size, now, now,
-      status === 'approved' ? 'system (auto-approve)' : null, status === 'approved' ? now : null, tagStr(v.tags), v.changelog, ownerEmail, status === 'approved' ? 1 : null),
+      status === 'approved' ? 'system (auto-approve)' : null, status === 'approved' ? now : null, tagStr(v.tags), v.changelog, ownerEmail, status === 'approved' ? 1 : null,
+      v.demoUrl, v.accessGuide, v.accessPrivate ? 1 : 0, v.screenshots.length ? JSON.stringify(v.screenshots) : null),
     env.DB.prepare('INSERT INTO app_versions (app_id,version,ts,actor,type,url,size,note) VALUES (?,1,?,?,?,?,?,?)').bind(id, now, v.author, v.type, v.url, v.size, v.changelog || 'initial'),
     env.DB.prepare('INSERT INTO app_reviews (app_id,ts,actor,action,note) VALUES (?,?,?,?,?)').bind(id, now, v.author, 'submitted', null),
     ...(status === 'approved' ? [env.DB.prepare('INSERT INTO app_reviews (app_id,ts,actor,action,note) VALUES (?,?,?,?,?)').bind(id, now, 'system', 'approved', '자동 승인 설정 / auto-approve')] : []),
@@ -311,7 +326,7 @@ async function updateApp(c, id) {
   const { s, admin: byAdmin0 } = await requireManage(c, row);
   row = await findApp(env, id); // may have just been linked to the account
   const b = await readJson(c.req, MAX_HTML + 512 * 1024);
-  const v = validate(b, row);
+  const v = validate(b, row, byAdmin0);
   if (row.owner_email && !byAdmin0) v.email = row.owner_email; // contact email is the verified account
   // a new version is recorded whenever the runnable source changes (HTML body or link URL)
   const srcChanged = v.html !== null || (row.type === 'link' && v.url !== row.url);
@@ -327,16 +342,22 @@ async function updateApp(c, id) {
     env.DB.prepare(
       `UPDATE apps SET name=?, url=?, category=?, description=?, thumbnail=?, author_name=?, author_email=?, status=?,
          size=CASE WHEN ? THEN ? ELSE size END, updated_at=?, tags=?, version=?, changelog=CASE WHEN ? THEN ? ELSE changelog END,
-         approved_version=CASE WHEN ?='approved' THEN ? ELSE approved_version END WHERE id=?`
-    ).bind(v.name, v.url, v.category, v.description, v.thumbnail, v.author, v.email, status, v.html !== null ? 1 : 0, v.size, now, tagStr(v.tags), newVer, srcChanged ? 1 : 0, v.changelog, status, newVer, id),
+         approved_version=CASE WHEN ?='approved' THEN ? ELSE approved_version END, demo_url=?, access_guide=?, access_private=?, screenshots=? WHERE id=?`
+    ).bind(v.name, v.url, v.category, v.description, v.thumbnail, v.author, v.email, status, v.html !== null ? 1 : 0, v.size, now, tagStr(v.tags), newVer, srcChanged ? 1 : 0, v.changelog, status, newVer,
+      v.demoUrl, v.accessGuide, v.accessPrivate ? 1 : 0, v.screenshots.length ? JSON.stringify(v.screenshots) : null, id),
     ...(srcChanged ? [env.DB.prepare('INSERT OR REPLACE INTO app_versions (app_id,version,ts,actor,type,url,size,note) VALUES (?,?,?,?,?,?,?,?)')
       .bind(id, newVer, now, actor, row.type, v.url, v.html !== null ? v.size : row.size, v.changelog)] : []),
     env.DB.prepare('INSERT INTO app_reviews (app_id,ts,actor,action,note) VALUES (?,?,?,?,?)').bind(id, now, actor, byAdmin ? 'edited' : 'resubmitted', v.html !== null ? 'HTML 소스 변경 포함 / includes HTML change' : null),
   ]);
-  const changed = ['name', 'url', 'category', 'description', 'thumbnail', 'author', 'email'].filter((k) => {
-    const col = { author: 'author_name', email: 'author_email' }[k] || k;
+  const changed = ['name', 'url', 'category', 'description', 'thumbnail', 'author', 'email', 'demoUrl', 'accessGuide'].filter((k) => {
+    const col = { author: 'author_name', email: 'author_email', demoUrl: 'demo_url', accessGuide: 'access_guide' }[k] || k;
     return (row[col] || null) !== (v[k] || null);
   });
+  if (!!row.access_private !== v.accessPrivate) changed.push('accessPrivate');
+  if ((row.screenshots || null) !== (v.screenshots.length ? JSON.stringify(v.screenshots) : null)) {
+    changed.push('screenshots');
+    c.ctx.waitUntil(dropUnusedImages(env, parseShots(row.screenshots), v.screenshots));
+  }
   if (v.html !== null) changed.push('html');
   if (tagStr(v.tags) !== (row.tags || '')) changed.push('tags');
   if (srcChanged) c.ctx.waitUntil(pruneVersions(env, id, newVer));
@@ -1301,6 +1322,13 @@ async function adminRoute(c, s, sub, m) {
   }
   if (sub === 'settings' && m === 'GET') return json({ settings: await getSettings(env), env: integrationStatus(env) });
   if (sub === 'settings' && m === 'PUT') return saveSettings(c, s);
+  if (sub.startsWith('ai')) {
+    if (!isAdmin(s)) fail(403, '관리자 권한이 필요합니다.');
+    if (sub === 'ai' && m === 'GET') return json({ ai: await aiPublicConfig(env) });
+    if (sub === 'ai' && m === 'PUT') return saveAiConfig(c, s);
+    if (sub === 'ai/models' && m === 'POST') return aiModels(c);
+    if (sub === 'ai/test' && m === 'POST') return aiTest(c);
+  }
   if (sub === 'approvers' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT * FROM approvers ORDER BY role DESC, created_at').all();
     return json({ approvers: results });
@@ -1560,10 +1588,10 @@ async function adminRestore(c) {
   const stmts = [];
   for (const a of b.apps) {
     stmts.push(env.DB.prepare(
-      `INSERT OR REPLACE INTO apps (id,type,name,url,category,description,thumbnail,author_name,author_email,owner_key_hash,status,review_note,featured,views,runs,rating_sum,rating_count,size,created_at,updated_at,reviewed_by,reviewed_at,tags,version,changelog,owner_email,approved_version)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT OR REPLACE INTO apps (id,type,name,url,category,description,thumbnail,author_name,author_email,owner_key_hash,status,review_note,featured,views,runs,rating_sum,rating_count,size,created_at,updated_at,reviewed_by,reviewed_at,tags,version,changelog,owner_email,approved_version,demo_url,access_guide,access_private,screenshots)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(a.id, a.type, a.name, a.url, a.category, a.description, a.thumbnail, a.author_name, a.author_email, a.owner_key_hash, a.status, a.review_note,
-      a.featured || 0, a.views || 0, a.runs || 0, a.rating_sum || 0, a.rating_count || 0, a.size || 0, a.created_at, a.updated_at, a.reviewed_by || null, a.reviewed_at || null, a.tags || '', a.version || 1, a.changelog || null, a.owner_email || null, a.approved_version || null));
+      a.featured || 0, a.views || 0, a.runs || 0, a.rating_sum || 0, a.rating_count || 0, a.size || 0, a.created_at, a.updated_at, a.reviewed_by || null, a.reviewed_at || null, a.tags || '', a.version || 1, a.changelog || null, a.owner_email || null, a.approved_version || null, a.demo_url || null, a.access_guide || null, a.access_private ? 1 : 0, a.screenshots || null));
   }
   for (const r of b.ratings || []) stmts.push(env.DB.prepare('INSERT OR REPLACE INTO ratings (app_id,voter,stars,created_at) VALUES (?,?,?,?)').bind(r.app_id, r.voter, r.stars, r.created_at));
   for (const f of b.feedback || []) stmts.push(env.DB.prepare('INSERT OR REPLACE INTO feedback (id,app_id,message,ip,created_at) VALUES (?,?,?,?,?)').bind(f.id, f.app_id, f.message, f.ip, f.created_at));
@@ -1584,6 +1612,308 @@ async function adminRestore(c) {
   for (const [k, h] of Object.entries(b.htmlVersions || {})) if (typeof h === 'string' && /^[a-z0-9]{6,16}:v\d+$/.test(k)) await env.HTML.put('html:' + k, h);
   await audit(c, 'backup.restore', 'system', null, { apps: b.apps.length, html: htmlCount, approvers: (b.approvers || []).length });
   return json({ ok: true, apps: b.apps.length, html: htmlCount });
+}
+
+/* ─────────────── Screenshots (uploaded images in KV) ─────────────── */
+function parseShots(v) {
+  try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a.filter((x) => x && typeof x.url === 'string') : []; } catch (_) { return []; }
+}
+const IMG_SIG = [
+  ['image/png', (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47],
+  ['image/jpeg', (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff],
+  ['image/gif', (b) => b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46],
+  ['image/webp', (b) => b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50],
+];
+async function uploadImage(c, s) {
+  const { env } = c;
+  const len = Number(c.req.headers.get('content-length') || 0);
+  if (len > MAX_IMAGE) fail(413, '이미지는 2MB 이하만 올릴 수 있습니다.');
+  if (!isAdmin(s) && !(await hit(env, 'img-upload:' + s.e, 60, 86400000))) fail(429, '이미지 업로드 한도(하루 60장)를 초과했습니다.');
+  const buf = new Uint8Array(await c.req.arrayBuffer());
+  if (buf.length > MAX_IMAGE) fail(413, '이미지는 2MB 이하만 올릴 수 있습니다.');
+  const type = (IMG_SIG.find(([, ok]) => buf.length > 12 && ok(buf)) || [])[0]; // sniff the bytes, ignore the declared type (no SVG)
+  if (!type) fail(400, 'PNG, JPEG, GIF, WebP 이미지만 올릴 수 있습니다.');
+  const id = randomId(16);
+  await env.HTML.put('img:' + id, buf, { metadata: { type, owner: s.e, ts: Date.now(), size: buf.length } });
+  await audit(c, 'image.upload', 'image', id, { size: buf.length, type }, true, s.e, s.r);
+  return json({ id, path: `/img/${id}`, size: buf.length, type }, 201); // the client prefixes its API base
+}
+async function serveImage(c, id) {
+  const { value, metadata } = await c.env.HTML.getWithMetadata('img:' + id, { type: 'arrayBuffer' });
+  if (!value) return new Response('Not found', { status: 404 });
+  return new Response(c.req.method === 'HEAD' ? null : value, {
+    headers: {
+      'content-type': metadata?.type || 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable',
+      'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox", 'cross-origin-resource-policy': 'cross-origin',
+    },
+  });
+}
+// called after the DB change: an uploaded image is deleted only when no app references it any more
+async function dropUnusedImages(env, before, after) {
+  const keep = new Set(after.map((x) => x.url));
+  for (const x of before) {
+    const m = !keep.has(x.url) && String(x.url).match(/\/img\/([a-z0-9]{16})$/);
+    if (!m) continue;
+    const used = await env.DB.prepare('SELECT 1 FROM apps WHERE screenshots LIKE ? LIMIT 1').bind(`%/img/${m[1]}"%`).first();
+    if (!used) { try { await env.HTML.delete('img:' + m[1]); } catch (_) { /* noop */ } }
+  }
+}
+
+/* ─────────────── GitHub import + AI description (v11) ─────────────── */
+// Admin picks one provider. The API key is AES-GCM encrypted (key derived from SESSION_SECRET) and never sent back.
+const AI_PROVIDERS = {
+  anthropic: { base: 'https://api.anthropic.com', label: 'Anthropic Claude' },
+  openai: { base: 'https://api.openai.com/v1', label: 'OpenAI' },
+  gemini: { base: 'https://generativelanguage.googleapis.com/v1beta/openai', label: 'Google Gemini (OpenAI-compatible)' },
+  compat: { base: '', label: 'OpenAI-compatible (vLLM, Azure, etc.)' },
+};
+// local dev only (DEV_LOGIN): allow an http://localhost mock
+const aiBaseOk = (c, u) => isHttps(u) || (devLoginOn(c) && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(u));
+async function aiCryptoKey(env) {
+  const secret = env.SESSION_SECRET || env.ADMIN_PASSWORD;
+  if (!secret) fail(400, 'SESSION_SECRET이 없어 API 키를 암호화할 수 없습니다.');
+  const raw = await crypto.subtle.digest('SHA-256', enc('krvcf-ai-key:' + secret));
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+async function aiConfig(env) {
+  const rows = (await env.DB.prepare("SELECT k, v FROM settings WHERE k IN ('ai_config','secret:ai_key')").all()).results;
+  const m = Object.fromEntries(rows.map((r) => [r.k, r.v]));
+  let cfg = {};
+  try { cfg = JSON.parse(m.ai_config || '{}'); } catch (_) { /* reset */ }
+  cfg = { provider: '', baseUrl: '', model: '', enabled: false, dailyLimit: 200, ...cfg };
+  let key = null;
+  if (m['secret:ai_key']) {
+    try {
+      const [iv, ct] = m['secret:ai_key'].split('.');
+      key = new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64uDec(iv) }, await aiCryptoKey(env), b64uDec(ct)));
+    } catch (_) { key = null; } // SESSION_SECRET changed → key must be entered again
+  }
+  return { ...cfg, key };
+}
+async function aiPublicConfig(env) {
+  const c = await aiConfig(env);
+  const { results } = await env.DB.prepare("SELECT updated_at, updated_by FROM settings WHERE k='ai_config'").all();
+  return {
+    provider: c.provider, baseUrl: c.baseUrl, model: c.model, enabled: !!c.enabled, dailyLimit: c.dailyLimit,
+    keySet: !!c.key, keyHint: c.key ? '••••' + c.key.slice(-4) : null, providers: AI_PROVIDERS,
+    updatedAt: results[0]?.updated_at || null, updatedBy: results[0]?.updated_by || null,
+  };
+}
+async function aiReady(env) {
+  try { const c = await aiConfig(env); return !!(c.enabled && c.provider && c.model && c.key); } catch (_) { return false; }
+}
+async function saveAiConfig(c, s) {
+  const { env } = c;
+  const b = await readJson(c.req, 16 * 1024);
+  const cur = await aiConfig(env);
+  const provider = AI_PROVIDERS[b.provider] ? b.provider : b.provider === '' ? '' : fail(400, '지원하지 않는 AI 제공자입니다.');
+  const baseUrl = str(b.baseUrl, 300).replace(/\/+$/, '');
+  if (baseUrl && !aiBaseOk(c, baseUrl)) fail(400, 'AI API 주소는 https:// 여야 합니다.');
+  if (provider === 'compat' && !baseUrl) fail(400, 'OpenAI 호환 API 주소를 입력하세요.');
+  const model = str(b.model, 120);
+  const enabled = !!b.enabled;
+  if (enabled && !model) fail(400, 'AI 모델 이름을 입력하세요.');
+  const dailyLimit = Math.min(Math.max(parseInt(b.dailyLimit, 10) || 200, 1), 5000);
+  const cfg = { provider, baseUrl, model, enabled, dailyLimit };
+  const now = Date.now();
+  const stmts = [env.DB.prepare('INSERT INTO settings (k,v,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at, updated_by=excluded.updated_by').bind('ai_config', JSON.stringify(cfg), now, s.e)];
+  let keyChange = null;
+  if (b.clearKey) { stmts.push(env.DB.prepare("DELETE FROM settings WHERE k='secret:ai_key'")); keyChange = 'cleared'; }
+  else if (typeof b.apiKey === 'string' && b.apiKey.trim()) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aiCryptoKey(env), enc(b.apiKey.trim().slice(0, 500)));
+    stmts.push(env.DB.prepare('INSERT INTO settings (k,v,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at, updated_by=excluded.updated_by').bind('secret:ai_key', `${b64u(iv)}.${b64u(ct)}`, now, s.e));
+    keyChange = 'set';
+  }
+  if (enabled && !(keyChange === 'set' || (cur.key && keyChange !== 'cleared'))) fail(400, 'API 키가 없습니다.');
+  await env.DB.batch(stmts);
+  const diff = {};
+  for (const k of ['provider', 'baseUrl', 'model', 'enabled', 'dailyLimit']) if (cur[k] !== cfg[k]) diff[k] = { from: cur[k], to: cfg[k] };
+  if (keyChange) diff.apiKey = keyChange; // the key itself is never logged
+  await audit(c, 'settings.ai', 'settings', null, diff);
+  return json({ ai: await aiPublicConfig(env) });
+}
+function aiEndpoint(cfg) {
+  const base = (cfg.baseUrl || AI_PROVIDERS[cfg.provider]?.base || '').replace(/\/+$/, '');
+  if (!cfg.provider || !base) fail(400, 'AI 모델이 설정되지 않았습니다.');
+  return base;
+}
+async function aiFetch(url, init, ms = 45000) {
+  let r;
+  try { r = await fetch(url, { ...init, signal: AbortSignal.timeout(ms) }); } catch (e) { fail(502, `AI API 연결 실패: ${String(e.message || e).slice(0, 120)}`); }
+  const t = await r.text();
+  let d; try { d = JSON.parse(t); } catch (_) { d = null; }
+  if (!r.ok) fail(502, `AI API ${r.status}: ${String((d && (d.error?.message || d.error?.type || d.message)) || t).slice(0, 200)}`);
+  return d;
+}
+async function aiChat(cfg, system, user, maxTokens = 1800) {
+  if (!cfg.key) fail(400, 'API 키가 없습니다.');
+  if (!cfg.model) fail(400, 'AI 모델 이름을 입력하세요.');
+  const base = aiEndpoint(cfg);
+  if (cfg.provider === 'anthropic') {
+    const d = await aiFetch(`${base}/v1/messages`, {
+      method: 'POST',
+      headers: { 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: cfg.model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
+    });
+    return (d.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('').trim();
+  }
+  const d = await aiFetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${cfg.key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: cfg.model, max_tokens: maxTokens, temperature: 0.3, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+  });
+  return String(d.choices?.[0]?.message?.content || '').trim();
+}
+async function aiFromBody(c, b) {
+  // test/models may run with unsaved form values; an empty key means "use the saved key"
+  const saved = await aiConfig(c.env);
+  const cfg = {
+    provider: AI_PROVIDERS[b.provider] ? b.provider : saved.provider,
+    baseUrl: b.baseUrl !== undefined ? str(b.baseUrl, 300).replace(/\/+$/, '') : saved.baseUrl,
+    model: b.model !== undefined ? str(b.model, 120) : saved.model,
+    key: (typeof b.apiKey === 'string' && b.apiKey.trim()) || saved.key,
+  };
+  if (cfg.baseUrl && !aiBaseOk(c, cfg.baseUrl)) fail(400, 'AI API 주소는 https:// 여야 합니다.');
+  return cfg;
+}
+async function aiModels(c) {
+  const cfg = await aiFromBody(c, await readJson(c.req, 8192));
+  if (!cfg.key) fail(400, 'API 키가 없습니다.');
+  const base = aiEndpoint(cfg);
+  const d = cfg.provider === 'anthropic'
+    ? await aiFetch(`${base}/v1/models?limit=100`, { headers: { 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01' } }, 15000)
+    : await aiFetch(`${base}/models`, { headers: { authorization: `Bearer ${cfg.key}` } }, 15000);
+  const ids = (d.data || d.models || []).map((x) => String(x.id || x.name || '').replace(/^models\//, '')).filter(Boolean);
+  return json({ models: [...new Set(ids)].slice(0, 300) });
+}
+async function aiTest(c) {
+  const cfg = await aiFromBody(c, await readJson(c.req, 8192));
+  const t0 = Date.now();
+  const out = await aiChat(cfg, 'Reply with one short Korean sentence.', 'KRVCF App Center AI 연결 테스트입니다. "연결 성공"이라고 답하세요.', 60);
+  await audit(c, 'ai.test', 'settings', null, { provider: cfg.provider, model: cfg.model, ms: Date.now() - t0 });
+  return json({ ok: true, ms: Date.now() - t0, reply: out.slice(0, 200), model: cfg.model });
+}
+
+function parseGithubRepo(u) {
+  const t = str(u, 300).replace(/\.git$/, '').replace(/\/+$/, '');
+  const m = t.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})(?:[/?#].*)?$/) || t.match(/^([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})$/);
+  if (!m) fail(400, 'GitHub 저장소 주소를 입력하세요. 예: https://github.com/owner/repo');
+  return { owner: m[1], repo: m[2] };
+}
+async function ghPublic(env, path, accept = 'application/vnd.github+json') {
+  const go = (auth) => fetch(`${env.GH_PUBLIC_API || 'https://api.github.com'}${path}`, { headers: { accept, 'user-agent': 'krvcf-app-center', 'x-github-api-version': '2022-11-28', ...(auth ? { authorization: `Bearer ${env.GH_TOKEN}` } : {}) }, signal: AbortSignal.timeout(15000) });
+  let r = await go(!!env.GH_TOKEN); // the patch token raises the rate limit; fall back to anonymous if it is refused
+  if (env.GH_TOKEN && (r.status === 401 || r.status === 403)) r = await go(false);
+  return r;
+}
+// screenshots referenced by the README: markdown ![alt](src) and <img src>, relative paths resolved to raw.githubusercontent.com
+function readmeImages(md, owner, repo, ref) {
+  const out = [];
+  const add = (src, alt) => {
+    src = String(src || '').trim().replace(/^<|>$/g, '').split(/\s+/)[0];
+    if (!src || /^data:/i.test(src)) return;
+    let u;
+    if (/^https?:\/\//i.test(src)) u = src;
+    else if (src.startsWith('//')) u = 'https:' + src;
+    else u = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${src.replace(/^\.?\//, '')}`;
+    u = u.replace(/^http:/i, 'https:')
+      .replace(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/(.+)$/i, 'https://raw.githubusercontent.com/$1/$2/$3');
+    const path = u.split(/[?#]/)[0].toLowerCase();
+    const badge = /shields\.io|badge|badgen\.net|travis-ci|circleci|codecov|coveralls|githubusercontent\.com\/.+\/workflows\/|\/actions\/workflows\/|img\.shields|forthebadge|sonarcloud|deepscan|snyk\.io|komarev|star-history|contrib\.rocks|buymeacoffee|ko-fi/.test(u.toLowerCase());
+    const imgExt = /\.(png|jpe?g|gif|webp)$/.test(path) || /user-images\.githubusercontent\.com|github\.com\/user-attachments\/assets\//.test(u);
+    if (badge || !imgExt || path.endsWith('.svg')) return;
+    if (!out.some((x) => x.url === u)) out.push({ url: u, caption: str(String(alt || '').replace(/[\[\]]/g, ''), 120) });
+  };
+  for (const m of md.matchAll(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) add(m[2], m[1]);
+  for (const m of md.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)) add(m[1], (m[0].match(/\balt\s*=\s*["']([^"']*)["']/i) || [])[1]);
+  return out.slice(0, 12);
+}
+function mdToText(md) {
+  return String(md || '')
+    .replace(/<!--[\s\S]*?-->/g, '').replace(/```[\s\S]*?```/g, ' ').replace(/<[^>]+>/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^#{1,6}\s*/gm, '').replace(/[*_`>|]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+async function githubImport(c, s) {
+  const { env } = c;
+  const b = await readJson(c.req, 4096);
+  const { owner, repo } = parseGithubRepo(b.url);
+  if (!isAdmin(s) && !(await hit(env, 'gh-import:' + s.e, 30, 86400000))) fail(429, 'GitHub 불러오기 한도(하루 30회)를 초과했습니다.');
+  const t0 = Date.now();
+  const mr = await ghPublic(env, `/repos/${owner}/${repo}`);
+  if (mr.status === 404) fail(404, 'GitHub 저장소를 찾을 수 없습니다 (비공개이거나 주소가 틀림).');
+  if (!mr.ok) fail(502, `GitHub API ${mr.status}`);
+  const meta = await mr.json();
+  if (meta.private) fail(404, 'GitHub 저장소를 찾을 수 없습니다 (비공개이거나 주소가 틀림).');
+  const rr = await ghPublic(env, `/repos/${owner}/${repo}/readme`, 'application/vnd.github.raw');
+  const readme = rr.ok ? (await rr.text()).slice(0, 60000) : '';
+  const pagesUrl = meta.has_pages ? (meta.name.toLowerCase() === `${meta.owner.login.toLowerCase()}.github.io` ? `https://${meta.owner.login.toLowerCase()}.github.io/` : `https://${meta.owner.login.toLowerCase()}.github.io/${meta.name}/`) : null;
+  const homepage = isHttpUrl(meta.homepage || '') ? meta.homepage : null;
+  const images = readmeImages(readme, meta.owner.login, meta.name, meta.default_branch || 'main');
+  const repoInfo = {
+    url: meta.html_url, fullName: meta.full_name, description: meta.description || '', homepage, pagesUrl,
+    topics: meta.topics || [], language: meta.language || null, stars: meta.stargazers_count || 0,
+    license: meta.license?.spdx_id || null, updatedAt: meta.pushed_at || null, readmeChars: readme.length, images,
+  };
+  // fallback: repository description + first README paragraphs, no AI
+  const plain = mdToText(readme);
+  const base = {
+    name: str(meta.name.replace(/[-_]+/g, ' '), 80),
+    description: str([meta.description, plain.split(/\n\n/).filter((x) => x.trim().length > 30).slice(0, 3).join('\n\n')].filter(Boolean).join('\n\n'), 1500),
+    tags: parseTags(meta.topics || []), category: null, demoUrl: homepage || pagesUrl || '', accessGuide: '',
+  };
+  const cfg = await aiConfig(env);
+  const ready = !!(cfg.enabled && cfg.provider && cfg.model && cfg.key);
+  if (!ready) {
+    await audit(c, 'ai.github_import', 'repo', meta.full_name, { ai: false, ms: Date.now() - t0 }, true, s.e, s.r);
+    return json({ repo: repoInfo, draft: base, ai: false, reason: 'not_configured' });
+  }
+  if (!(await hit(env, 'ai-global', cfg.dailyLimit || 200, 86400000))) {
+    await audit(c, 'ai.github_import', 'repo', meta.full_name, { ai: false, reason: 'daily_limit' }, false, s.e, s.r);
+    return json({ repo: repoInfo, draft: base, ai: false, reason: 'daily_limit' });
+  }
+  const lang = c.lang === 'en' ? 'English' : 'Korean';
+  const system = `You write catalog entries for "KRVCF App Center", a community catalog of web apps and tools for VMware / infrastructure engineers.
+Use ONLY facts found in the repository metadata and README. Do not invent features, URLs, accounts or numbers.
+Return ONE JSON object and nothing else, with exactly these keys:
+{"name": string (<= 60 chars, human-friendly app name),
+ "description": string (${lang}, plain text without markdown symbols, 3-8 short lines: what it does, who it is for, key features as "- " lines, how to use; <= 1200 chars),
+ "tags": array of up to 5 short lowercase keywords,
+ "category": one of ${JSON.stringify(CATEGORIES)},
+ "demoUrl": a runnable demo/live URL explicitly given in the metadata or README, else "",
+ "accessGuide": string (${lang}, how to access or run it: live URL, required account/VPN, or install/run commands from the README; <= 600 chars; "" if unknown)}`;
+  const user = `Repository: ${meta.full_name}
+URL: ${meta.html_url}
+Description: ${meta.description || '-'}
+Homepage: ${homepage || '-'}
+GitHub Pages: ${pagesUrl || '-'}
+Topics: ${(meta.topics || []).join(', ') || '-'}
+Primary language: ${meta.language || '-'}
+License: ${repoInfo.license || '-'}
+
+README (may be truncated):
+"""
+${readme.slice(0, 14000) || '(no README)'}
+"""`;
+  try {
+    const out = await aiChat(cfg, system, user);
+    const jm = out.match(/\{[\s\S]*\}/);
+    const d = JSON.parse(jm ? jm[0] : out);
+    const draft = {
+      name: str(d.name, 80) || base.name,
+      description: str(d.description, 2000) || base.description,
+      tags: parseTags(Array.isArray(d.tags) ? d.tags : base.tags).slice(0, 5),
+      category: CATEGORIES.includes(d.category) ? d.category : null,
+      demoUrl: isHttpUrl(str(d.demoUrl, 1000)) ? str(d.demoUrl, 1000) : base.demoUrl,
+      accessGuide: str(d.accessGuide, 2000),
+    };
+    await audit(c, 'ai.github_import', 'repo', meta.full_name, { ai: true, provider: cfg.provider, model: cfg.model, ms: Date.now() - t0 }, true, s.e, s.r);
+    return json({ repo: repoInfo, draft, ai: true, model: cfg.model });
+  } catch (e) {
+    await audit(c, 'ai.github_import', 'repo', meta.full_name, { ai: false, provider: cfg.provider, model: cfg.model, error: String(e.message || e).slice(0, 200) }, false, s.e, s.r);
+    return json({ repo: repoInfo, draft: base, ai: false, reason: 'ai_error', error: String(e.message || e).slice(0, 200) });
+  }
 }
 
 /* ─────────────── GitHub patch / deploy ─────────────── */
@@ -1792,10 +2122,13 @@ function normEmail(v) {
   const e = str(v, 120).toLowerCase();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) ? e : null;
 }
+function isHttpUrl(u) {
+  try { const x = new URL(u); return (x.protocol === 'https:' || x.protocol === 'http:') && !!x.hostname; } catch (_) { return false; }
+}
 function isHttps(u) {
   try { return new URL(u).protocol === 'https:'; } catch (_) { return false; }
 }
-function validate(b, existing) {
+function validate(b, existing, lenient = false) {
   const type = existing ? existing.type : b.type === 'html' || b.type === 'link' ? b.type : fail(400, '앱 유형이 올바르지 않습니다.');
   const name = str(b.name, 80);
   if (!name) fail(400, '앱 이름을 입력하세요.');
@@ -1817,9 +2150,21 @@ function validate(b, existing) {
     size = enc(html).length;
     if (size > MAX_HTML) fail(413, 'HTML은 10MB 이하만 허용됩니다.');
   } else if (!existing) fail(400, 'HTML 소스를 첨부하세요.');
+  // catalog (link) apps: a runnable demo URL and how to get in are required (admins may edit legacy apps without them)
+  let demoUrl = str(b.demoUrl, 1000) || null, accessGuide = str(b.accessGuide, 2000) || null;
+  const accessPrivate = !!b.accessPrivate && !!accessGuide;
+  if (demoUrl && !isHttpUrl(demoUrl)) fail(400, '데모 URL은 http:// 또는 https:// 로 시작하는 주소여야 합니다.');
+  if (type === 'link' && !lenient) {
+    if (!demoUrl) fail(400, '실행 가능한 데모 URL을 입력하세요.');
+    if (!accessGuide) fail(400, '데모 접속 방법을 입력하세요.');
+  }
+  const shots = Array.isArray(b.screenshots) ? b.screenshots : [];
+  if (shots.length > MAX_SHOTS) fail(400, `스크린샷은 최대 ${MAX_SHOTS}장까지 등록할 수 있습니다.`);
+  const screenshots = shots.map((x) => ({ url: str(typeof x === 'string' ? x : x?.url, 1000), caption: str(x?.caption, 120) }))
+    .filter((x) => x.url).map((x) => { if (!isHttps(x.url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/img\/[a-z0-9]{16}$/.test(x.url)) fail(400, '스크린샷은 https:// 이미지 주소만 허용됩니다.'); return x.caption ? x : { url: x.url }; });
   const tags = parseTags(b.tags);
   const changelog = str(b.changelog, 300) || null;
-  return { type, name, author, email: email ? email.toLowerCase() : null, category, description, thumbnail: thumbnail || null, url, html, size, tags, changelog };
+  return { screenshots, type, name, author, email: email ? email.toLowerCase() : null, category, description, thumbnail: thumbnail || null, url, html, size, tags, changelog, demoUrl, accessGuide, accessPrivate };
 }
 async function findApp(env, id) {
   const row = await env.DB.prepare('SELECT * FROM apps WHERE id=?').bind(id).first();
@@ -1827,6 +2172,7 @@ async function findApp(env, id) {
   return row;
 }
 async function removeApp(env, id) {
+  const shotRow = await env.DB.prepare('SELECT screenshots FROM apps WHERE id=?').bind(id).first();
   const { results: vers } = await env.DB.prepare('SELECT version FROM app_versions WHERE app_id=?').bind(id).all();
   for (const v of vers) await env.HTML.delete(`html:${id}:v${v.version}`);
   await env.DB.batch([
@@ -1840,11 +2186,13 @@ async function removeApp(env, id) {
     env.DB.prepare('DELETE FROM feedback WHERE app_id=?').bind(id),
   ]);
   await env.HTML.delete('html:' + id);
+  if (shotRow) await dropUnusedImages(env, parseShots(shotRow.screenshots), []);
 }
 const avg = (r) => (r.rating_count ? Math.round((r.rating_sum / r.rating_count) * 10) / 10 : 0);
 
 // level 0: public / 1: owner / 2: approver·admin
-function pub(r, level) {
+// opt.guide: include the access guide (detail views). Private guides need a signed-in viewer or owner/staff.
+function pub(r, level, opt = {}) {
   const o = {
     id: r.id, type: r.type, name: r.name, url: r.type === 'link' ? r.url : null, category: r.category,
     description: r.description, thumbnail: r.thumbnail || null, author: r.author_name, runs: r.runs, views: r.views || 0,
@@ -1852,6 +2200,13 @@ function pub(r, level) {
     createdAt: r.created_at, updatedAt: r.updated_at,
     tags: r.tags ? String(r.tags).split(',').filter(Boolean) : [], version: r.version || 1, changelog: r.changelog || null,
   };
+  if (r.demo_url) o.demoUrl = r.demo_url;
+  const shots = parseShots(r.screenshots);
+  if (shots.length) o.screenshots = shots;
+  if (r.access_guide) {
+    o.hasAccessGuide = true; o.accessPrivate = !!r.access_private;
+    if (level >= 1 || (opt.guide && (!r.access_private || opt.signedIn))) o.accessGuide = r.access_guide;
+  }
   if (r.type === 'link' && r.link_status) { o.linkStatus = r.link_status; o.linkCheckedAt = r.link_checked_at || null; }
   if (level >= 1) { o.status = r.status; o.note = r.review_note || null; o.reviewedAt = r.reviewed_at || null; o.approvedVersion = r.approved_version || null; o.linkError = r.link_error || null; }
   if (level >= 2) { o.email = r.author_email || null; o.reviewedBy = r.reviewed_by || null; o.owner = r.owner_email || null; }
@@ -1891,7 +2246,7 @@ async function getSettings(env) {
   if (env.AUTO_APPROVE === 'true') s.auto_approve = 'true';
   try {
     const { results } = await env.DB.prepare('SELECT k, v FROM settings').all();
-    for (const r of results) s[r.k] = r.v;
+    for (const r of results) if (!r.k.startsWith('secret:') && r.k !== 'ai_config') s[r.k] = r.v;
   } catch (_) { /* before migration */ }
   return s;
 }
